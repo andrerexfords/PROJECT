@@ -47,7 +47,9 @@ aws configure
 
 ### Step 1 — Provision AWS infra (Terraform, di folder ini)
 
-Semua AWS resources (VPC + subnets + IGW + SG + EC2) di-bundle dalam **satu module** `modules/glchat-aws/`. Tidak perlu siapkan VPC/subnet existing.
+Semua AWS resources (VPC + subnets + IGW + SG + NLB + EC2) di-bundle dalam **satu module** `modules/glchat-aws/`. Tidak perlu siapkan VPC/subnet existing.
+
+> 📋 **Sebelum mulai:** baca [`docs/configuration.md`](docs/configuration.md) untuk daftar lengkap value yang perlu disiapkan (AWS creds, key pair, AMI ID, dll).
 
 ```bash
 cd modules/glchat-aws
@@ -162,9 +164,11 @@ glchat-infra/
 │   ├── install-cluster.sh         # orchestrate install RKE2+Rancher via bastion
 │   └── label-taint-nodes.sh       # standalone: connect cluster + label/taint
 └── docs/
+    ├── configuration.md           # ⭐ checklist SEMUA value yang perlu diisi (baca dulu!)
     ├── errors.md                  # log error `make infra-standalone-scripts` (Task 1c-d)
     ├── taint-and-label.md         # konsep taint/label + skema GLChat (Task 3)
-    └── gpu-exclusion-plan.md      # PR plan modif Makefile upstream (Task 2)
+    ├── gpu-exclusion-plan.md      # PR plan modif Makefile upstream (Task 2)
+    └── timeline.md                # progress timeline per task
 ```
 
 ---
