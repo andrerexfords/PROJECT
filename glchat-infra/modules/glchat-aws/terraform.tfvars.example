@@ -1,0 +1,25 @@
+# Copy file ini jadi terraform.tfvars dan isi value-nya:
+#   cp terraform.tfvars.example terraform.tfvars
+
+aws_region   = "ap-southeast-1"
+project_name = "glchat"
+environment  = "standalone"
+
+# ---------- WAJIB diisi ----------
+
+key_name = "your-ec2-keypair-name"   # nama key pair yg sudah ada di AWS
+ami_id   = "ami-xxxxxxxxxxxxxxxxx"   # Ubuntu 22.04 atau Debian 12 di region target
+
+# ---------- Network (default biasanya cukup) ----------
+
+vpc_cidr            = "10.0.0.0/16"
+public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+
+# GANTI ke IP kantor/rumah supaya SSH tidak open ke seluruh internet.
+# Contoh: "203.0.113.45/32"
+allowed_ssh_cidr = "0.0.0.0/0"
+
+# ---------- GPU ----------
+
+# Default: false. Set true kalau client butuh GPU worker.
+include_gpu = false
