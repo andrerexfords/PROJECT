@@ -16,11 +16,20 @@ Layout di laptop target:
 
 ## Prereq
 
+Quick install (Ubuntu/Debian):
+```bash
+make setup           # install terraform, aws cli, kubectl, jq (idempotent)
+make setup-dry       # preview tanpa install
+```
+
+Atau manual:
+
 | Tool      | Versi minimal | Cek |
 |-----------|---------------|-----|
 | Terraform | 1.5+          | `terraform -version` |
 | AWS CLI   | 2.x           | `aws --version` |
 | kubectl   | 1.27+         | `kubectl version --client` |
+| jq        | any           | `jq --version` |
 | make      | any           | `make --version` |
 | git       | any           | `git --version` |
 
@@ -54,42 +63,40 @@ Kalau perlu GPU node:
 make infra-provision-gpu
 ```
 
-### Step 2 — Clone repo upstream (sibling folder)
+### Step 2 — Install RKE2 + Rancher (otomatis via `install-cluster`)
+
+Script `install-cluster.sh` baca terraform output, generate `config.yml` (IPs auto-filled), copy ke bastion, lalu run installer upstream.
 
 ```bash
-cd ..
-git clone https://github.com/GDP-ADMIN/gl-sre-helm-charts
-cd gl-sre-helm-charts
+# Dry-run dulu — cuma generate config, tidak SSH
+make install-cluster-dry
+# Hasil ada di config.generated.yml — review & edit field CHANGEME
+
+# Jalankan beneran (default NO GPU, sesuai Task 2)
+make install-cluster
+
+# Include GPU node
+make install-cluster-gpu
 ```
 
-### Step 3 — Isi `config.yml` repo upstream
-
-Isi dengan IP dari `make infra-output`:
-- `infra.bastion.ip`         — bastion public IP
-- `infra.rancher.ip`         — master private IP
-- `infra.rke2.nodes[]`       — master + worker (private IP)
-- `infra.load_balancer.*`    — LB internal IP + domain
-- `infra.rke2.nodes[].labels` — pakai `gen-ai=application` / `gen-ai=dpo`
-
-Letakkan file rahasia di `apps/config/`:
-- `gcp-service-account.json` (minta ke `infra@gdplabs.id`)
-- `kube-config.yaml`
-- `tls-secret.yaml`
-
-### Step 4 — Run installer dari bastion
-
+Override opsional via env var (sebelum `make`):
 ```bash
-# SSH ke bastion (forward agent supaya bisa SSH ke node lain)
-ssh -A <user>@<bastion-public-ip>
-
-# Di bastion
-cd gl-sre-helm-charts
-make infra-standalone-scripts ARGS="--exclude gpu-node"   # tanpa GPU (Task 2)
-# ATAU
-make infra-standalone-scripts                              # dengan GPU
+REMOTE_USER=admin RANCHER_PASSWORD='S3cret!' LB_DOMAIN='glchat.client.com' make install-cluster
 ```
+
+Sebelum jalankan, letakkan file rahasia di repo upstream (clone-nya akan di bastion):
+- `apps/config/gcp-service-account.json` (minta ke `infra@gdplabs.id`)
+- `apps/config/kube-config.yaml`
+- `apps/config/tls-secret.yaml`
 
 **Setiap error yang muncul → tulis ke `docs/errors.md`** pakai template (Task 1c-d).
+
+#### Alternatif manual (kalau `install-cluster` tidak cocok)
+
+`make handoff` print instruksi step-by-step untuk:
+1. Clone `gl-sre-helm-charts` sebagai sibling folder
+2. Isi `config.yml` manual
+3. SSH bastion + run installer
 
 ### Step 5 — Label & taint nodes
 
@@ -119,11 +126,15 @@ make help
 Quick reference:
 | Command                    | Fungsi |
 |----------------------------|--------|
+| `make setup`               | Install prereq tools (terraform/aws/kubectl/jq) di laptop |
 | `make infra-provision`     | Terraform apply (VPC + 4 EC2, no GPU) |
 | `make infra-provision-gpu` | Terraform apply (VPC + 5 EC2, + GPU) |
 | `make infra-output`        | Print IP/ID semua instance + VPC info |
+| `make install-cluster`     | Auto install RKE2+Rancher via bastion (no GPU) |
+| `make install-cluster-gpu` | Sama, include GPU |
+| `make install-cluster-dry` | Generate config.generated.yml saja |
 | `make infra-destroy`       | Destroy SEMUA resource (VPC + EC2, HATI-HATI) |
-| `make handoff`             | Print instruksi step 2-4 di terminal |
+| `make handoff`             | Print instruksi manual (alternatif install-cluster) |
 | `make k8s-label-nodes`     | Apply label/taint nodes (standalone) |
 | `make k8s-label-nodes-dry` | Preview perintah label/taint |
 
@@ -145,6 +156,8 @@ glchat-infra/
 │       ├── terraform.tfvars.example
 │       └── README.md
 ├── scripts/
+│   ├── setup.sh                   # bootstrap prereq (terraform, aws cli, kubectl, jq)
+│   ├── install-cluster.sh         # orchestrate install RKE2+Rancher via bastion
 │   └── label-taint-nodes.sh       # standalone: connect cluster + label/taint
 └── docs/
     ├── errors.md                  # log error `make infra-standalone-scripts` (Task 1c-d)

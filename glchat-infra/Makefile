@@ -1,4 +1,4 @@
-.PHONY: help infra-init infra-plan infra-provision infra-provision-gpu infra-output infra-destroy handoff k8s-label-nodes k8s-label-nodes-dry clean
+.PHONY: help setup setup-dry infra-init infra-plan infra-provision infra-provision-gpu infra-output infra-destroy handoff install-cluster install-cluster-gpu install-cluster-dry k8s-label-nodes k8s-label-nodes-dry clean
 
 TERRAFORM_DIR := modules/glchat-aws
 SCRIPTS_DIR   := scripts
@@ -16,6 +16,10 @@ help:
 	@echo "Setelah EC2 ready, install RKE2/Rancher pakai repo upstream:"
 	@echo "  https://github.com/GDP-ADMIN/gl-sre-helm-charts"
 	@echo ""
+	@echo "Bootstrap:"
+	@echo "  setup                - install prereq: terraform, aws cli, kubectl, jq"
+	@echo "  setup-dry            - dry-run (print perintah install tanpa apply)"
+	@echo ""
 	@echo "Provisioning (Terraform):"
 	@echo "  infra-init           - terraform init"
 	@echo "  infra-plan           - terraform plan (default tanpa GPU)"
@@ -24,8 +28,13 @@ help:
 	@echo "  infra-output         - tampilkan IP/ID semua instance"
 	@echo "  infra-destroy        - destroy semua resource"
 	@echo ""
-	@echo "Post-provision:"
-	@echo "  handoff              - print instruksi next step (clone repo upstream + isi config.yml)"
+	@echo "Install cluster (RKE2 + Rancher via bastion):"
+	@echo "  install-cluster      - generate config + SSH bastion + run installer (NO GPU)"
+	@echo "  install-cluster-gpu  - sama, include GPU node"
+	@echo "  install-cluster-dry  - dry-run: generate config saja, tidak SSH"
+	@echo ""
+	@echo "Post-provision (info only):"
+	@echo "  handoff              - print instruksi manual (alternatif install-cluster)"
 	@echo ""
 	@echo "Kubernetes (standalone — alternatif kalau tidak via repo upstream):"
 	@echo "  k8s-label-nodes      - connect ke cluster + label/taint nodes"
@@ -35,6 +44,12 @@ help:
 	@echo "  clean                - hapus .terraform & tfplan lokal"
 	@echo ""
 	@echo "Override GPU di provision: make infra-provision INCLUDE_GPU=true"
+
+setup:
+	$(SCRIPTS_DIR)/setup.sh
+
+setup-dry:
+	DRY_RUN=1 $(SCRIPTS_DIR)/setup.sh
 
 infra-init:
 	$(TF) init -upgrade
@@ -83,6 +98,15 @@ handoff:
 	@echo "     make infra-standalone-scripts                              # dengan GPU"
 	@echo ""
 	@echo "6) Catat semua error yg muncul ke docs/errors.md (template sudah ada)."
+
+install-cluster:
+	$(SCRIPTS_DIR)/install-cluster.sh
+
+install-cluster-gpu:
+	INCLUDE_GPU=1 $(SCRIPTS_DIR)/install-cluster.sh
+
+install-cluster-dry:
+	DRY_RUN=1 $(SCRIPTS_DIR)/install-cluster.sh
 
 k8s-label-nodes:
 	PROJECT_NAME=$(PROJECT_NAME) ENVIRONMENT=$(ENVIRONMENT) $(SCRIPTS_DIR)/label-taint-nodes.sh
