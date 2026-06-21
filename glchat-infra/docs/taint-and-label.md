@@ -1,6 +1,6 @@
 # Taint & Label Nodes — Konsep + Implementasi GLChat
 
-Referensi untuk Task 3. Berisi: konsep singkat, dua cara apply di GLChat (native upstream vs script standalone), contoh skema label per workload.
+Referensi untuk Task 3. Konsep singkat + skema label/taint per node sesuai arsitektur baru (master + worker BE/FE/DB + optional GPU).
 
 ---
 
@@ -21,71 +21,51 @@ Format taint: `key=value:effect`
 Contoh toleration di pod spec:
 ```yaml
 tolerations:
-  - key: "nvidia.com/gpu"
+  - key: "workload"
     operator: "Equal"
-    value: "true"
+    value: "database"
     effect: "NoSchedule"
 ```
 
-**Cara mikir cepat:** label = "siapa saya?", taint = "siapa boleh masuk?".
+Cara mikir cepat: **label = "siapa saya?"**, **taint = "siapa boleh masuk?"**.
 
 ---
 
-## Dua cara apply di GLChat
+## Strategi label/taint GLChat (current)
 
-### Opsi A — Native via repo upstream (RECOMMENDED untuk standalone install)
+Default yang dipasang `scripts/label-taint-nodes.sh`:
 
-Repo `gl-sre-helm-charts` sudah punya komponen `label-taints` di scripts-nya.
-Kamu cuma perlu isi `config.yml`:
+| Node                              | Labels                                                                     | Taints                            | Alasan |
+|-----------------------------------|----------------------------------------------------------------------------|-----------------------------------|--------|
+| `glchat-standalone-master`        | `node-role.kubernetes.io/control-plane=true`, `node-role=master`           | (default RKE2)                    | Control plane |
+| `glchat-standalone-worker-be`     | `node-role.kubernetes.io/worker=true`, `workload=backend`                  | —                                 | Pod backend di sini |
+| `glchat-standalone-worker-fe`     | `node-role.kubernetes.io/worker=true`, `workload=frontend`                 | —                                 | Pod frontend di sini |
+| `glchat-standalone-worker-db`     | `node-role.kubernetes.io/worker=true`, `workload=database`                 | `workload=database:NoSchedule`    | Database isolated, hanya pod ber-toleration yang boleh masuk |
+| `glchat-standalone-gpu` (opt)     | `node-role.kubernetes.io/worker=true`, `accelerator=nvidia`, `workload=gpu`| `nvidia.com/gpu=true:NoSchedule`  | GPU mahal, hanya pod GPU |
 
-```yaml
-infra:
-  rke2:
-    nodes:
-      - name: master-1
-        ip: 10.128.0.6
-        role: [etcd, controlplane]
-        labels:
-          - gen-ai=application
-        taints:
-          - gen-ai=application:NoSchedule
+**Bastion di-skip** — bukan k8s node.
 
-      - name: worker-1
-        ip: 10.128.0.10
-        role: worker
-        labels:
-          - gen-ai=dpo
+---
 
-      # Contoh app/database separation (sesuai task: App=node a, DB=node b)
-      - name: worker-app
-        ip: 10.128.0.11
-        role: worker
-        labels:
-          - workload=app
+## Cara apply
 
-      - name: worker-db
-        ip: 10.128.0.12
-        role: worker
-        labels:
-          - workload=database
-        taints:
-          - workload=database:NoSchedule
-```
+### Opsi A — Native via repo upstream (lewat `install-cluster`)
 
-Jalankan (di bastion):
+Sudah otomatis: `make install-cluster` generate `config.yml` dengan field `labels`/`taints` per node, lalu repo upstream apply lewat komponennya. Jadi setelah `make install-cluster` selesai, label/taint sudah terpasang.
+
+Re-apply manual (kalau perlu update tanpa rerun semua):
 ```bash
-make infra-standalone-scripts                          # full install (label-taints included)
-make infra-standalone-scripts ARGS="--include label-taints"   # HANYA re-apply label/taint
+# Di bastion
+cd gl-sre-helm-charts
+make infra-standalone-scripts ARGS="--include label-taints"
 ```
 
-### Opsi B — Standalone script (kalau cluster sudah ada / di-manage manual)
+### Opsi B — Standalone script (alternatif)
 
-Pakai `scripts/label-taint-nodes.sh` di folder ini. Cocok untuk:
+Pakai script di folder ini. Cocok untuk:
 - Cluster yang BUKAN di-install via `gl-sre-helm-charts`
 - Re-label/taint cepat tanpa harus rerun installer
-- Testing/learning
-
-Naming convention: script mencocokkan node berdasarkan pola `<PROJECT_NAME>-<ENVIRONMENT>-<role>` (default: `glchat-standalone-*`, sesuai Terraform).
+- Testing / learning
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
@@ -102,39 +82,23 @@ make k8s-label-nodes PROJECT_NAME=foo ENVIRONMENT=prod
 
 ---
 
-## Strategi label/taint default
+## Contoh: deploy pod sesuai workload
 
-Default yang dipasang script (bisa diubah di `scripts/label-taint-nodes.sh`):
-
-| Node                          | Labels                                                                 | Taints                            | Alasan |
-|-------------------------------|------------------------------------------------------------------------|-----------------------------------|--------|
-| `glchat-standalone-master`    | `node-role.kubernetes.io/control-plane=true`, `gen-ai=application`     | `gen-ai=application:NoSchedule`   | Control plane, pisahkan dari workload umum |
-| `glchat-standalone-worker`    | `node-role.kubernetes.io/worker=true`, `gen-ai=dpo`                    | —                                 | Worker default — terima workload GLChat |
-| `glchat-standalone-gpu`       | `node-role.kubernetes.io/worker=true`, `accelerator=nvidia`, `gen-ai=gpu` | `nvidia.com/gpu=true:NoSchedule` | GPU mahal, hanya untuk pod GPU |
-
-**Bastion & loadbalancer di-skip** — mereka biasanya bukan k8s node.
-
----
-
-## Contoh App/Database separation
-
-Skenario task: "App == node a, Database == node b" — supaya app & database tidak berebut resource di node yang sama.
-
-**Setup label/taint:**
-```bash
-kubectl label node node-a workload=app --overwrite
-kubectl label node node-b workload=database --overwrite
-kubectl taint node node-b workload=database:NoSchedule --overwrite
-```
-
-**Pod App** (pakai `nodeSelector`, **tidak perlu toleration** karena node-a tanpa taint):
+### Backend pod
 ```yaml
 spec:
   nodeSelector:
-    workload: app
+    workload: backend
 ```
 
-**Pod Database** (pakai `nodeSelector` + `toleration` karena node-b di-taint):
+### Frontend pod
+```yaml
+spec:
+  nodeSelector:
+    workload: frontend
+```
+
+### Database pod (butuh toleration karena di-taint)
 ```yaml
 spec:
   nodeSelector:
@@ -146,7 +110,7 @@ spec:
       effect: "NoSchedule"
 ```
 
-Hasil: pod App **hanya** landed di node-a, pod Database **hanya** landed di node-b, dan **tidak ada pod lain** yang nyasar ke node-b (terlindungi taint).
+Hasil: pod backend hanya landed di `worker-be`, frontend di `worker-fe`, database di `worker-db`. Pod tanpa toleration **tidak akan nyasar** ke `worker-db`.
 
 ---
 
@@ -159,7 +123,7 @@ Script `label-taint-nodes.sh` mengandalkan `KUBECONFIG`. Opsi:
 | Export env var | `export KUBECONFIG=~/.kube/glchat-standalone.yaml` |
 | Default path | `mkdir -p ~/.kube && cp kubeconfig ~/.kube/config` |
 | Dari Rancher UI | Cluster → Kubeconfig File → download |
-| Dari RKE2/kubeadm master | SSH master → `cat /etc/rancher/rke2/rke2.yaml` (RKE2) atau `/etc/kubernetes/admin.conf` (kubeadm) |
+| Dari RKE2 master | SSH master → `sudo cat /etc/rancher/rke2/rke2.yaml` |
 
 Verifikasi connection sebelum run script:
 ```bash

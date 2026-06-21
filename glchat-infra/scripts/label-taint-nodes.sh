@@ -2,14 +2,16 @@
 # Label & taint k8s nodes setelah cluster siap (Task 3).
 #
 # Connect ke cluster via $KUBECONFIG, lalu apply label/taint berdasarkan
-# pola nama node (mengikuti naming Terraform: <project>-<env>-<role>).
+# pola nama node (sesuai naming Terraform: <project>-<env>-<role>).
 #
-# Naming convention (sesuai terraform/variables.tf):
-#   glchat-standalone-master  -> control plane (label gen-ai=application + taint)
-#   glchat-standalone-worker  -> general worker (label gen-ai=dpo)
-#   glchat-standalone-gpu     -> GPU worker (label accelerator=nvidia + taint nvidia.com/gpu)
+# Naming convention default (variables.tf):
+#   glchat-standalone-master    -> control plane
+#   glchat-standalone-worker-be -> backend workloads        (label workload=backend)
+#   glchat-standalone-worker-fe -> frontend workloads       (label workload=frontend)
+#   glchat-standalone-worker-db -> database workloads       (label workload=database + taint)
+#   glchat-standalone-gpu       -> GPU worker               (label + taint nvidia.com/gpu)
 #
-# Bastion & loadbalancer biasanya BUKAN k8s node, jadi tidak diproses di sini.
+# Bastion BUKAN k8s node, jadi tidak diproses di sini.
 #
 # Usage:
 #   ./label-taint-nodes.sh                          # apply pakai default KUBECONFIG
@@ -43,25 +45,35 @@ apply_for_node() {
 
   case "$node" in
     *${prefix}master*)
-      log "[$node] control-plane -> label gen-ai=application + taint NoSchedule"
+      log "[$node] control-plane -> label node-role=master"
       $KUBECTL label node "$node" node-role.kubernetes.io/control-plane=true --overwrite
-      $KUBECTL label node "$node" gen-ai=application --overwrite
-      $KUBECTL taint node "$node" gen-ai=application:NoSchedule --overwrite
+      $KUBECTL label node "$node" node-role=master --overwrite
       ;;
-    *${prefix}worker*)
-      log "[$node] worker -> label gen-ai=dpo"
+    *${prefix}worker-be*)
+      log "[$node] backend worker -> label workload=backend"
       $KUBECTL label node "$node" node-role.kubernetes.io/worker=true --overwrite
-      $KUBECTL label node "$node" gen-ai=dpo --overwrite
+      $KUBECTL label node "$node" workload=backend --overwrite
+      ;;
+    *${prefix}worker-fe*)
+      log "[$node] frontend worker -> label workload=frontend"
+      $KUBECTL label node "$node" node-role.kubernetes.io/worker=true --overwrite
+      $KUBECTL label node "$node" workload=frontend --overwrite
+      ;;
+    *${prefix}worker-db*)
+      log "[$node] database worker -> label workload=database + taint NoSchedule"
+      $KUBECTL label node "$node" node-role.kubernetes.io/worker=true --overwrite
+      $KUBECTL label node "$node" workload=database --overwrite
+      $KUBECTL taint node "$node" workload=database:NoSchedule --overwrite
       ;;
     *${prefix}gpu*)
-      log "[$node] worker-gpu -> label accelerator + taint nvidia.com/gpu"
+      log "[$node] GPU worker -> label accelerator + taint nvidia.com/gpu"
       $KUBECTL label node "$node" node-role.kubernetes.io/worker=true --overwrite
       $KUBECTL label node "$node" accelerator=nvidia --overwrite
-      $KUBECTL label node "$node" gen-ai=gpu --overwrite
+      $KUBECTL label node "$node" workload=gpu --overwrite
       $KUBECTL taint node "$node" nvidia.com/gpu=true:NoSchedule --overwrite
       ;;
     *)
-      log "[$node] tidak match pola — skip (kalau seharusnya di-label, cek naming convention)"
+      log "[$node] tidak match pola — skip (cek naming convention kalau ini error)"
       ;;
   esac
 }

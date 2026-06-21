@@ -25,7 +25,7 @@ variable "vpc_cidr" {
 }
 
 variable "public_subnet_cidrs" {
-  description = "CIDR untuk public subnets (1 per AZ). Semua EC2 ditaruh di public untuk simplicity."
+  description = "CIDR untuk public subnets (1 per AZ). NLB butuh minimal 2 AZ untuk HA."
   type        = list(string)
   default     = ["10.0.1.0/24", "10.0.2.0/24"]
 }
@@ -54,10 +54,15 @@ variable "include_gpu" {
   default     = false
 }
 
-# Instance type sesuai tabel "Minimum Server Setup" di README gl-sre-helm-charts.
-# Disk size ikut default AMI (tidak di-customize di sini).
+# Cluster layout:
+#   bastion     - control center (SSH jumphost, bukan k8s node)
+#   master      - k8s control plane (RKE2)
+#   worker-be   - backend workloads
+#   worker-fe   - frontend workloads
+#   worker-db   - database workloads (akan di-taint)
+# (no load balancer EC2 — pakai AWS NLB)
 variable "instances" {
-  description = "Map konfigurasi 4 node wajib untuk cluster GLChat standalone"
+  description = "Map konfigurasi EC2 (bastion + master + worker-be/fe/db)"
   type = map(object({
     instance_type = string
     role          = string
@@ -68,17 +73,21 @@ variable "instances" {
       instance_type = "t3.small"
       role          = "bastion"
     }
-    loadbalancer = {
-      instance_type = "t3.medium"
-      role          = "loadbalancer"
-    }
     master = {
       instance_type = "t3.xlarge"
       role          = "k8s-master"
     }
-    worker = {
+    worker-be = {
       instance_type = "t3.2xlarge"
-      role          = "k8s-worker"
+      role          = "k8s-worker-backend"
+    }
+    worker-fe = {
+      instance_type = "t3.2xlarge"
+      role          = "k8s-worker-frontend"
+    }
+    worker-db = {
+      instance_type = "t3.2xlarge"
+      role          = "k8s-worker-database"
     }
   }
 }
@@ -94,4 +103,12 @@ variable "gpu_instance" {
     instance_type = "g4dn.xlarge"
     role          = "k8s-worker-gpu"
   }
+}
+
+# ---------- Load Balancer (AWS NLB) ----------
+
+variable "enable_load_balancer" {
+  description = "Provision AWS NLB di depan worker nodes (untuk ingress) & master (untuk API)"
+  type        = bool
+  default     = true
 }

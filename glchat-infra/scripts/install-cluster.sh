@@ -3,13 +3,16 @@
 #
 # Apa yang dilakukan script ini:
 #   1. Baca output `terraform output -json` (butuh modul glchat-aws sudah ter-apply)
-#   2. Generate `config.generated.yml` — template config.yml dengan IP sudah terisi
-#   3. SCP config + clone gl-sre-helm-charts ke bastion
-#   4. Run `make infra-standalone-scripts` di bastion (default: --exclude gpu-node, sesuai Task 2)
+#   2. Generate `config.generated.yml` — config.yml dengan IP & LB DNS auto-filled
+#   3. SCP config + clone gl-sre-helm-charts di bastion
+#   4. Run `make infra-standalone-scripts` di bastion (default --exclude gpu-node, sesuai Task 2)
+#
+# Arsitektur: bastion + master + worker-be + worker-fe + worker-db (+ optional GPU).
+# Load balancer pakai AWS NLB (dns_name dari terraform output).
 #
 # Usage:
-#   ./scripts/install-cluster.sh                 # default no-GPU, interactive confirm
-#   INCLUDE_GPU=1 ./scripts/install-cluster.sh   # include GPU node
+#   ./scripts/install-cluster.sh                 # default no-GPU
+#   INCLUDE_GPU=1 ./scripts/install-cluster.sh   # include GPU
 #   DRY_RUN=1 ./scripts/install-cluster.sh       # generate config + print perintah, tidak SSH
 #   AUTO=1 ./scripts/install-cluster.sh          # skip konfirmasi interaktif
 
@@ -23,14 +26,14 @@ INCLUDE_GPU="${INCLUDE_GPU:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 AUTO="${AUTO:-0}"
 
-# Bisa di-override via env
+# Override via env
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
 SSH_KEY="${SSH_KEY:-}"
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/GDP-ADMIN/gl-sre-helm-charts}"
 RANCHER_USERNAME="${RANCHER_USERNAME:-admin}"
 RANCHER_PASSWORD="${RANCHER_PASSWORD:-CHANGEME-please-edit-config-yml}"
 RANCHER_CLUSTER_NAME="${RANCHER_CLUSTER_NAME:-glchat-standalone}"
-LB_DOMAIN="${LB_DOMAIN:-glchat.example.com}"
+LB_DOMAIN="${LB_DOMAIN:-}"
 K8S_VERSION="${K8S_VERSION:-v1.32.5+rke2r1}"
 
 # ---------- helpers ----------
@@ -54,29 +57,37 @@ cd "$TF_DIR"
 
 TF_OUT=$(terraform output -json 2>/dev/null) || die "Gagal baca terraform output. Pastikan 'make infra-provision' sudah dijalankan."
 
-BASTION_IP=$(echo "$TF_OUT" | jq -r '.instance_public_ips.value.bastion // empty')
-LB_PUB_IP=$(echo "$TF_OUT" | jq -r '.instance_public_ips.value.loadbalancer // empty')
-LB_PRIV_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value.loadbalancer // empty')
-MASTER_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value.master // empty')
-WORKER_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value.worker // empty')
-GPU_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value.gpu // empty')
+BASTION_IP=$(echo "$TF_OUT"   | jq -r '.instance_public_ips.value.bastion // empty')
+MASTER_IP=$(echo "$TF_OUT"    | jq -r '.instance_private_ips.value.master // empty')
+WORKER_BE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-be"] // empty')
+WORKER_FE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-fe"] // empty')
+WORKER_DB_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-db"] // empty')
+GPU_IP=$(echo "$TF_OUT"       | jq -r '.instance_private_ips.value.gpu // empty')
+NLB_DNS=$(echo "$TF_OUT"      | jq -r '.nlb_dns_name.value // empty')
 
-[[ -z "$BASTION_IP"  ]] && die "Bastion IP kosong di terraform output"
-[[ -z "$MASTER_IP"   ]] && die "Master private IP kosong"
-[[ -z "$WORKER_IP"   ]] && die "Worker private IP kosong"
-[[ -z "$LB_PRIV_IP"  ]] && die "Load balancer private IP kosong"
+[[ -z "$BASTION_IP"   ]] && die "Bastion IP kosong di terraform output"
+[[ -z "$MASTER_IP"    ]] && die "Master private IP kosong"
+[[ -z "$WORKER_BE_IP" ]] && die "Worker-BE private IP kosong"
+[[ -z "$WORKER_FE_IP" ]] && die "Worker-FE private IP kosong"
+[[ -z "$WORKER_DB_IP" ]] && die "Worker-DB private IP kosong"
+[[ -z "$NLB_DNS"      ]] && die "NLB DNS kosong (enable_load_balancer=false?)"
+
+# Default LB_DOMAIN ke NLB DNS kalau user tidak set
+[[ -z "$LB_DOMAIN" ]] && LB_DOMAIN="$NLB_DNS"
 
 ok "Bastion (public)     = $BASTION_IP"
-ok "Load Balancer (priv) = $LB_PRIV_IP"
-ok "Load Balancer (pub)  = $LB_PUB_IP"
-ok "Master (private)     = $MASTER_IP"
-ok "Worker (private)     = $WORKER_IP"
+ok "Master  (private)    = $MASTER_IP"
+ok "Worker-BE (private)  = $WORKER_BE_IP"
+ok "Worker-FE (private)  = $WORKER_FE_IP"
+ok "Worker-DB (private)  = $WORKER_DB_IP"
 [[ -n "$GPU_IP" ]] && ok "GPU (private)        = $GPU_IP"
+ok "NLB DNS              = $NLB_DNS"
+ok "LB server_name       = $LB_DOMAIN"
 
 # ---------- 2. generate config.generated.yml ----------
 
 CONFIG_OUT="$PROJECT_ROOT/config.generated.yml"
-log "Generate $CONFIG_OUT (IPs auto-filled)..."
+log "Generate $CONFIG_OUT (IP & NLB auto-filled)..."
 
 GPU_NODE_BLOCK=""
 if [[ "$INCLUDE_GPU" == "1" && -n "$GPU_IP" ]]; then
@@ -86,7 +97,7 @@ if [[ "$INCLUDE_GPU" == "1" && -n "$GPU_IP" ]]; then
         role: worker
         labels:
           - accelerator=nvidia
-          - gen-ai=gpu
+          - workload=gpu
         taints:
           - nvidia.com/gpu=true:NoSchedule"
 fi
@@ -95,7 +106,13 @@ cat > "$CONFIG_OUT" <<YAML
 # AUTO-GENERATED oleh scripts/install-cluster.sh pada $(date -Iseconds)
 # Edit field bertanda CHANGEME sebelum apply ke bastion.
 #
-# Schema sesuai README upstream gl-sre-helm-charts.
+# Arsitektur:
+#   bastion     - control center (bukan k8s node)
+#   master      - RKE2 control plane (etcd + controlplane)
+#   worker-be   - backend workloads
+#   worker-fe   - frontend workloads
+#   worker-db   - database workloads (di-taint)
+# Load balancer: AWS NLB ($NLB_DNS)
 
 infra:
   bastion:
@@ -115,25 +132,38 @@ infra:
         ip: $MASTER_IP
         role: [etcd, controlplane]
         labels:
-          - gen-ai=application
-        taints:
-          - gen-ai=application:NoSchedule
+          - node-role=master
 
-      - name: worker-1
-        ip: $WORKER_IP
+      - name: worker-be
+        ip: $WORKER_BE_IP
         role: worker
         labels:
-          - gen-ai=dpo
+          - workload=backend
+
+      - name: worker-fe
+        ip: $WORKER_FE_IP
+        role: worker
+        labels:
+          - workload=frontend
+
+      - name: worker-db
+        ip: $WORKER_DB_IP
+        role: worker
+        labels:
+          - workload=database
+        taints:
+          - workload=database:NoSchedule
 $GPU_NODE_BLOCK
 
   load_balancer:
     ssl: true
-    server_name: "$LB_DOMAIN"   # CHANGEME
-    internal_ip: $LB_PRIV_IP
-    external_ip: $LB_PUB_IP
+    server_name: "$LB_DOMAIN"           # CHANGEME (kalau pakai custom domain, point ke NLB DNS)
+    # AWS NLB pakai DNS name, bukan static IP. Field di bawah diisi DNS untuk kompatibilitas.
+    internal_ip: $NLB_DNS
+    external_ip: $NLB_DNS
 
-# 'apps:' section TIDAK di-generate — copy dari example upstream lalu sesuaikan
-# (scope task ini: infrastructure only, kalau perlu app cuma learning app)
+# 'apps:' section TIDAK di-generate — copy dari example upstream lalu sesuaikan.
+# Scope task: infrastructure only (kalau perlu app cuma learning app).
 YAML
 
 ok "Config generated: $CONFIG_OUT"

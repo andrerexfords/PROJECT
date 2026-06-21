@@ -2,8 +2,10 @@
 
 Helper untuk task automation infrastruktur GLChat. Bagian dari workflow 2 layer:
 
-1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 4-5 EC2 di AWS
+1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 5-6 EC2 + AWS NLB
 2. **`gl-sre-helm-charts/`** (clone sibling) — upstream repo yang install RKE2/Rancher/apps via `make infra-standalone-scripts`
+
+**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). Load balancer pakai **AWS NLB** (bukan EC2).
 
 Layout di laptop target:
 ```
@@ -54,8 +56,8 @@ cp terraform.tfvars.example terraform.tfvars
 cd ../..
 
 make infra-plan          # cek dulu
-make infra-provision     # default: VPC + 4 EC2 (bastion + LB + master + worker, NO GPU)
-make infra-output        # catat public/private IP
+make infra-provision     # default: VPC + NLB + 5 EC2 (bastion + master + worker-be/fe/db, NO GPU)
+make infra-output        # catat public/private IP + NLB DNS
 ```
 
 Kalau perlu GPU node:
@@ -127,8 +129,8 @@ Quick reference:
 | Command                    | Fungsi |
 |----------------------------|--------|
 | `make setup`               | Install prereq tools (terraform/aws/kubectl/jq) di laptop |
-| `make infra-provision`     | Terraform apply (VPC + 4 EC2, no GPU) |
-| `make infra-provision-gpu` | Terraform apply (VPC + 5 EC2, + GPU) |
+| `make infra-provision`     | Terraform apply (VPC + NLB + 5 EC2, no GPU) |
+| `make infra-provision-gpu` | Terraform apply (VPC + NLB + 6 EC2, + GPU) |
 | `make infra-output`        | Print IP/ID semua instance + VPC info |
 | `make install-cluster`     | Auto install RKE2+Rancher via bastion (no GPU) |
 | `make install-cluster-gpu` | Sama, include GPU |
@@ -148,7 +150,7 @@ glchat-infra/
 ├── README.md                      # file ini
 ├── .gitignore                     # ignore tfstate, tfvars, pem, dll
 ├── modules/
-│   └── glchat-aws/                # SATU module: VPC + SG + EC2 (4 atau 5 dgn GPU)
+│   └── glchat-aws/                # SATU module: VPC + SG + NLB + 5/6 EC2
 │       ├── main.tf
 │       ├── variables.tf
 │       ├── outputs.tf

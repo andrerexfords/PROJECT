@@ -18,6 +18,8 @@ output "security_group_id" {
   value       = aws_security_group.glchat.id
 }
 
+# ---------- EC2 ----------
+
 output "instance_ids" {
   description = "Map nama instance -> EC2 instance ID"
   value       = { for k, v in module.ec2 : k => v.id }
@@ -34,6 +36,23 @@ output "instance_private_ips" {
 }
 
 output "ssh_commands" {
-  description = "Helper: command SSH per instance (assume default user ubuntu/admin)"
+  description = "Helper: command SSH per instance (asumsi user ubuntu)"
   value       = { for k, v in module.ec2 : k => "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${v.public_ip}" }
+}
+
+# ---------- NLB ----------
+
+output "nlb_dns_name" {
+  description = "DNS name AWS NLB (jadi server_name di config.yml upstream)"
+  value       = var.enable_load_balancer ? aws_lb.glchat[0].dns_name : null
+}
+
+output "nlb_zone_id" {
+  description = "Route53 hosted zone ID NLB (untuk alias record)"
+  value       = var.enable_load_balancer ? aws_lb.glchat[0].zone_id : null
+}
+
+output "nlb_arn" {
+  description = "ARN NLB"
+  value       = var.enable_load_balancer ? aws_lb.glchat[0].arn : null
 }

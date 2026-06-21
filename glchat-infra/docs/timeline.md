@@ -21,7 +21,7 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 
 | Sub-task | Status | Date | Deliverable |
 |----------|--------|------|-------------|
-| a. Provide 4/5 EC2 via terraform module `terraform-aws-modules/ec2-instance/aws` | ✅ | 2026-06-22 | `modules/glchat-aws/main.tf` (module ec2 + module vpc + sg) |
+| a. Provide 5/6 EC2 via terraform module `terraform-aws-modules/ec2-instance/aws` + AWS NLB | ✅ | 2026-06-22 | `modules/glchat-aws/main.tf` (module ec2 + module vpc + sg + aws_lb) |
 | b. Running `make infra-standalone-scripts` (upstream command) | ⚠️ | — | Instruksi run via `make handoff` (perlu AWS access untuk eksekusi) |
 | c. List error ke docs | ⚠️ | — | Template `docs/errors.md` (isi setelah run beneran) |
 | d. Solusi tiap error | ⚠️ | — | Template `docs/errors.md` (field `Solution`) |
@@ -33,7 +33,8 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 - **2026-06-22 01:00** — Adjust ke spec README upstream: 5 node (bastion/LB/master/worker/GPU)
 - **2026-06-22 01:30** — Restructure jadi single module `modules/glchat-aws/` (VPC + SG + EC2)
 - **2026-06-22 01:45** — Hapus customisasi `root_block_device` (gp3/encrypted/volume_size) supaya simpel
-- **⏳ Pending** — Run `make infra-provision` di laptop ber-AWS, lalu run `make infra-standalone-scripts` di bastion, capture error ke `docs/errors.md`
+- **2026-06-22 02:15** — Refactor arsitektur: drop LB EC2, split worker jadi BE/FE/DB, add **AWS NLB** (3 listener: 6443/443/80, target masters & workers)
+- **⏳ Pending** — Run `make infra-provision` di laptop ber-AWS, lalu `make install-cluster`, capture error ke `docs/errors.md`
 
 ---
 
@@ -74,6 +75,7 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 - **2026-06-22 00:50** — Tambah Makefile targets `k8s-label-nodes` + `k8s-label-nodes-dry`
 - **2026-06-22 01:10** — Tulis `docs/taint-and-label.md` (konsep + dua approach + skema GLChat)
 - **2026-06-22 01:30** — Update label scheme pakai `gen-ai=application/dpo` (selaras upstream config.yml)
+- **2026-06-22 02:15** — Switch ke skema `workload=backend/frontend/database` (sesuai split worker BE/FE/DB), taint hanya untuk DB
 - **⏳ Pending** — Verifikasi end-to-end di cluster beneran (setelah Task 1 selesai)
 
 ---
@@ -83,11 +85,12 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 | Item | Status | Date | Deliverable |
 |------|--------|------|-------------|
 | Module Terraform "sesimple" bernama `glchat-aws` | ✅ | 2026-06-22 | `modules/glchat-aws/` (5 .tf + tfvars.example + README) |
-| Satu module handle semua (VPC, SG, EC2) | ✅ | 2026-06-22 | `main.tf` — module vpc + sg + module ec2 |
+| Satu module handle semua (VPC, SG, NLB, EC2) | ✅ | 2026-06-22 | `main.tf` — module vpc + sg + module ec2 + aws_lb |
 | Setup script — install prereq tools | ✅ | 2026-06-22 | `scripts/setup.sh` + `make setup` |
 | Install script — RKE2 + Rancher | ✅ | 2026-06-22 | `scripts/install-cluster.sh` + `make install-cluster` |
+| Drop LB EC2, pakai AWS NLB (split worker BE/FE/DB) | ✅ | 2026-06-22 | NLB DNS auto-injected ke config.yml lewat install-cluster |
 | Timeline doc | ✅ | 2026-06-22 | `docs/timeline.md` (file ini) |
-| Commit + push ke `andrerexfords/PROJECT` | ✅ | 2026-06-22 | commit `b9848f8`, branch `main` |
+| Commit + push ke `andrerexfords/PROJECT` | ✅ | 2026-06-22 | commit terbaru di branch `main` |
 
 ---
 
