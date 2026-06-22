@@ -12,12 +12,16 @@ ami_id   = "ami-xxxxxxxxxxxxxxxxx"   # Ubuntu 22.04 atau Debian 12 di region tar
 
 # ---------- Network (default biasanya cukup) ----------
 
-vpc_cidr            = "10.0.0.0/16"
-public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]   # NLB + bastion
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"] # k8s master + workers
 
-# GANTI ke IP kantor/rumah supaya SSH tidak open ke seluruh internet.
+# GANTI ke IP kantor/rumah supaya SSH ke bastion tidak open ke seluruh internet.
 # Contoh: "203.0.113.45/32"
 allowed_ssh_cidr = "0.0.0.0/0"
+
+# Pakai 1 NAT GW saja (~$32/bulan). Set false untuk HA per-AZ (~$64/bulan).
+single_nat_gateway = true
 
 # ---------- GPU ----------
 

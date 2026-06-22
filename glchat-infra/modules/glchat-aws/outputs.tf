@@ -9,8 +9,18 @@ output "vpc_cidr" {
 }
 
 output "public_subnet_ids" {
-  description = "List ID public subnet"
+  description = "List ID public subnet (untuk NLB + bastion)"
   value       = module.vpc.public_subnets
+}
+
+output "private_subnet_ids" {
+  description = "List ID private subnet (untuk k8s master + workers)"
+  value       = module.vpc.private_subnets
+}
+
+output "nat_gateway_ips" {
+  description = "Elastic IP NAT Gateway(s) — outbound IP private subnet ke internet"
+  value       = module.vpc.nat_public_ips
 }
 
 output "security_group_id" {
@@ -26,7 +36,7 @@ output "instance_ids" {
 }
 
 output "instance_public_ips" {
-  description = "Map nama instance -> public IP"
+  description = "Map nama instance -> public IP (hanya bastion yg punya public IP)"
   value       = { for k, v in module.ec2 : k => v.public_ip }
 }
 
@@ -36,8 +46,11 @@ output "instance_private_ips" {
 }
 
 output "ssh_commands" {
-  description = "Helper: command SSH per instance (asumsi user ubuntu)"
-  value       = { for k, v in module.ec2 : k => "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${v.public_ip}" }
+  description = "Helper SSH: bastion via public IP, sisanya via bastion (-J jumphost)"
+  value = {
+    for k, v in module.ec2 :
+    k => v.public_ip != "" ? "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${v.public_ip}" : "ssh -i ~/.ssh/${var.key_name}.pem -J ubuntu@${try(module.ec2["bastion"].public_ip, "<bastion-public-ip>")} ubuntu@${v.private_ip}"
+  }
 }
 
 # ---------- NLB ----------

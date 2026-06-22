@@ -25,15 +25,27 @@ variable "vpc_cidr" {
 }
 
 variable "public_subnet_cidrs" {
-  description = "CIDR untuk public subnets (1 per AZ). NLB butuh minimal 2 AZ untuk HA."
+  description = "CIDR untuk public subnets (untuk NLB + bastion). NLB butuh minimal 2 AZ untuk HA."
   type        = list(string)
   default     = ["10.0.1.0/24", "10.0.2.0/24"]
 }
 
+variable "private_subnet_cidrs" {
+  description = "CIDR untuk private subnets (untuk k8s master + workers). Tidak ada akses langsung dari internet."
+  type        = list(string)
+  default     = ["10.0.11.0/24", "10.0.12.0/24"]
+}
+
 variable "allowed_ssh_cidr" {
-  description = "CIDR yang boleh SSH (port 22). GANTI ke IP kantor/rumah supaya tidak open ke seluruh internet."
+  description = "CIDR yang boleh SSH ke bastion (port 22). GANTI ke IP kantor/rumah supaya tidak open ke seluruh internet."
   type        = string
   default     = "0.0.0.0/0"
+}
+
+variable "single_nat_gateway" {
+  description = "Pakai 1 NAT Gateway saja (lebih murah ~$32/bulan vs ~$64 untuk per-AZ). Set true untuk POC, false untuk production HA."
+  type        = bool
+  default     = true
 }
 
 # ---------- Compute ----------

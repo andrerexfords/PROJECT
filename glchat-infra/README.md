@@ -5,7 +5,7 @@ Helper untuk task automation infrastruktur GLChat. Bagian dari workflow 2 layer:
 1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 5-6 EC2 + AWS NLB
 2. **`gl-sre-helm-charts/`** (clone sibling) — upstream repo yang install RKE2/Rancher/apps via `make infra-standalone-scripts`
 
-**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). Load balancer pakai **AWS NLB** (bukan EC2).
+**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). Load balancer pakai **AWS NLB** (bukan EC2). **Network:** bastion + NLB di public subnet, k8s nodes di private subnet (egress via NAT Gateway).
 
 Layout di laptop target:
 ```

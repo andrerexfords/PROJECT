@@ -60,13 +60,16 @@ cp terraform.tfvars.example terraform.tfvars
 
 | Variable               | Default              | Kapan diubah |
 |------------------------|----------------------|--------------|
-| `aws_region`           | `"ap-southeast-1"`   | Region selain Singapore (Jakarta `ap-southeast-3`, dll) |
-| `allowed_ssh_cidr`     | `"0.0.0.0/0"`        | **GANTI** ke IP kamu, mis. `"203.0.113.45/32"`. Cek IP via `curl ifconfig.me` |
-| `include_gpu`          | `false`              | Set `true` kalau client butuh GPU node |
-| `project_name`         | `"glchat"`           | Kalau ingin nama resource beda |
-| `environment`          | `"standalone"`       | `dev`, `staging`, `prod`, dll |
-| `vpc_cidr`             | `"10.0.0.0/16"`      | Kalau conflict dengan VPC existing |
-| `enable_load_balancer` | `true`               | Set `false` kalau LB di-handle terpisah |
+| `aws_region`           | `"ap-southeast-1"`           | Region selain Singapore (Jakarta `ap-southeast-3`, dll) |
+| `allowed_ssh_cidr`     | `"0.0.0.0/0"`                | **GANTI** ke IP kamu, mis. `"203.0.113.45/32"`. Cek IP via `curl ifconfig.me` |
+| `include_gpu`          | `false`                      | Set `true` kalau client butuh GPU node |
+| `project_name`         | `"glchat"`                   | Kalau ingin nama resource beda |
+| `environment`          | `"standalone"`               | `dev`, `staging`, `prod`, dll |
+| `vpc_cidr`             | `"10.0.0.0/16"`              | Kalau conflict dengan VPC existing |
+| `public_subnet_cidrs`  | `["10.0.1.0/24", "10.0.2.0/24"]`   | NLB + bastion (multi-AZ) |
+| `private_subnet_cidrs` | `["10.0.11.0/24","10.0.12.0/24"]`  | k8s master + workers (multi-AZ) |
+| `single_nat_gateway`   | `true`                       | `true`=1 NAT (~$32/mo), `false`=per-AZ HA (~$64/mo) |
+| `enable_load_balancer` | `true`                       | Set `false` kalau LB di-handle terpisah |
 
 ### AMI ID Ubuntu 22.04 LTS (per region, per Juni 2026)
 

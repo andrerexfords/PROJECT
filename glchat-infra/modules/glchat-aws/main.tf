@@ -14,11 +14,16 @@ locals {
 
   instances_to_create = var.include_gpu ? merge(var.instances, { gpu = var.gpu_instance }) : var.instances
 
-  master_keys  = [for k, v in local.instances_to_create : k if can(regex("master", k))]
-  worker_keys  = [for k, v in local.instances_to_create : k if can(regex("worker", k))]
+  # Instance placement:
+  #   - bastion       → public subnet  (SSH dari internet via allowed_ssh_cidr)
+  #   - master, worker-*, gpu → private subnet (no public IP, akses via bastion / NLB)
+  public_instances = ["bastion"]
+
+  master_keys = [for k, v in local.instances_to_create : k if can(regex("master", k))]
+  worker_keys = [for k, v in local.instances_to_create : k if can(regex("worker|gpu", k))]
 }
 
-# ---------- VPC + Subnets + IGW ----------
+# ---------- VPC + Subnets + IGW + NAT GW ----------
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
@@ -27,13 +32,16 @@ module "vpc" {
   name = "${local.name_prefix}-vpc"
   cidr = var.vpc_cidr
 
-  azs            = slice(data.aws_availability_zones.available.names, 0, length(var.public_subnet_cidrs))
-  public_subnets = var.public_subnet_cidrs
+  azs             = slice(data.aws_availability_zones.available.names, 0, length(var.public_subnet_cidrs))
+  public_subnets  = var.public_subnet_cidrs
+  private_subnets = var.private_subnet_cidrs
 
   enable_dns_hostnames = true
   enable_dns_support   = true
 
-  map_public_ip_on_launch = true
+  enable_nat_gateway     = true
+  single_nat_gateway     = var.single_nat_gateway
+  one_nat_gateway_per_az = !var.single_nat_gateway
 
   tags = local.common_tags
 }
@@ -45,14 +53,16 @@ resource "aws_security_group" "glchat" {
   description = "Security group cluster GLChat standalone"
   vpc_id      = module.vpc.vpc_id
 
+  # SSH dari allowed_ssh_cidr ke bastion (workers di private subnet, jadi tidak reachable dari internet bahkan dgn rule ini).
   ingress {
-    description = "SSH (restricted)"
+    description = "SSH (effective hanya untuk bastion di public subnet)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
   }
 
+  # k8s API & HTTP/HTTPS — NLB forward ke target (workers di private subnet pakai source IP client).
   ingress {
     description = "Kubernetes API (via NLB)"
     from_port   = 6443
@@ -86,7 +96,7 @@ resource "aws_security_group" "glchat" {
   }
 
   egress {
-    description = "Allow all egress"
+    description = "Allow all egress (private nodes via NAT GW)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -106,12 +116,15 @@ module "ec2" {
 
   name = "${local.name_prefix}-${each.key}"
 
-  ami                         = var.ami_id
-  instance_type               = each.value.instance_type
-  key_name                    = var.key_name
-  subnet_id                   = module.vpc.public_subnets[0]
-  vpc_security_group_ids      = [aws_security_group.glchat.id]
-  associate_public_ip_address = true
+  ami           = var.ami_id
+  instance_type = each.value.instance_type
+  key_name      = var.key_name
+
+  # Bastion → public subnet + public IP. Worker/master → private subnet, no public IP.
+  subnet_id                   = contains(local.public_instances, each.key) ? module.vpc.public_subnets[0] : module.vpc.private_subnets[0]
+  associate_public_ip_address = contains(local.public_instances, each.key)
+
+  vpc_security_group_ids = [aws_security_group.glchat.id]
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-${each.key}"
@@ -120,11 +133,10 @@ module "ec2" {
 }
 
 # ---------- AWS NLB (Network Load Balancer) ----------
-# Menggantikan loadbalancer EC2.
-#   - Listener 6443 (TCP) → master(s)     untuk akses k8s API
-#   - Listener 443  (TCP) → worker(s)     untuk ingress HTTPS
-#   - Listener 80   (TCP) → worker(s)     untuk ingress HTTP / LetsEncrypt HTTP-01
-# DNS name NLB jadi endpoint cluster (set sebagai server_name di config.yml upstream).
+# NLB di public subnet (internet-facing), target di private subnet — pola standard.
+#   - Listener 6443 (TCP) → master(s)     k8s API
+#   - Listener 443  (TCP) → workers       ingress HTTPS
+#   - Listener 80   (TCP) → workers       ingress HTTP / LetsEncrypt HTTP-01
 
 resource "aws_lb" "glchat" {
   count = var.enable_load_balancer ? 1 : 0
@@ -139,7 +151,7 @@ resource "aws_lb" "glchat" {
   tags = local.common_tags
 }
 
-# --- API target group (port 6443 → masters) ---
+# --- API target group (6443 → masters) ---
 
 resource "aws_lb_target_group" "api" {
   count = var.enable_load_balancer ? 1 : 0
@@ -182,7 +194,7 @@ resource "aws_lb_listener" "api" {
   }
 }
 
-# --- HTTPS target group (port 443 → workers) ---
+# --- HTTPS target group (443 → workers) ---
 
 resource "aws_lb_target_group" "https" {
   count = var.enable_load_balancer ? 1 : 0
@@ -225,7 +237,7 @@ resource "aws_lb_listener" "https" {
   }
 }
 
-# --- HTTP target group (port 80 → workers) ---
+# --- HTTP target group (80 → workers) ---
 
 resource "aws_lb_target_group" "http" {
   count = var.enable_load_balancer ? 1 : 0
