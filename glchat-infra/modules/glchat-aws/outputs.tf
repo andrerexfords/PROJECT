@@ -9,12 +9,12 @@ output "vpc_cidr" {
 }
 
 output "public_subnet_ids" {
-  description = "List ID public subnet (untuk NLB + bastion)"
+  description = "List ID public subnet (untuk bastion + master)"
   value       = module.vpc.public_subnets
 }
 
 output "private_subnet_ids" {
-  description = "List ID private subnet (untuk k8s master + workers)"
+  description = "List ID private subnet (untuk workers + gpu)"
   value       = module.vpc.private_subnets
 }
 
@@ -36,7 +36,7 @@ output "instance_ids" {
 }
 
 output "instance_public_ips" {
-  description = "Map nama instance -> public IP (hanya bastion yg punya public IP)"
+  description = "Map nama instance -> public IP (bastion + master)"
   value       = { for k, v in module.ec2 : k => v.public_ip }
 }
 
@@ -46,26 +46,9 @@ output "instance_private_ips" {
 }
 
 output "ssh_commands" {
-  description = "Helper SSH: bastion via public IP, sisanya via bastion (-J jumphost)"
+  description = "Helper SSH: bastion/master direct, workers via -J jumphost"
   value = {
     for k, v in module.ec2 :
     k => v.public_ip != "" ? "ssh -i ~/.ssh/${var.key_name}.pem ubuntu@${v.public_ip}" : "ssh -i ~/.ssh/${var.key_name}.pem -J ubuntu@${try(module.ec2["bastion"].public_ip, "<bastion-public-ip>")} ubuntu@${v.private_ip}"
   }
-}
-
-# ---------- NLB ----------
-
-output "nlb_dns_name" {
-  description = "DNS name AWS NLB (jadi server_name di config.yml upstream)"
-  value       = var.enable_load_balancer ? aws_lb.glchat[0].dns_name : null
-}
-
-output "nlb_zone_id" {
-  description = "Route53 hosted zone ID NLB (untuk alias record)"
-  value       = var.enable_load_balancer ? aws_lb.glchat[0].zone_id : null
-}
-
-output "nlb_arn" {
-  description = "ARN NLB"
-  value       = var.enable_load_balancer ? aws_lb.glchat[0].arn : null
 }

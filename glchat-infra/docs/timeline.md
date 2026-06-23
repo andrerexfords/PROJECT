@@ -34,6 +34,8 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 - **2026-06-22 01:30** — Restructure jadi single module `modules/glchat-aws/` (VPC + SG + EC2)
 - **2026-06-22 01:45** — Hapus customisasi `root_block_device` (gp3/encrypted/volume_size) supaya simpel
 - **2026-06-22 02:15** — Refactor arsitektur: drop LB EC2, split worker jadi BE/FE/DB, add **AWS NLB** (3 listener: 6443/443/80, target masters & workers)
+- **2026-06-22 ~02:45** — Split subnet jadi public (bastion + NLB) + private (k8s nodes) + NAT GW
+- **2026-06-23** — Drop AWS NLB. Master pindah ke public subnet, jadi endpoint k8s API & Rancher langsung. Workers tetap di private.
 - **⏳ Pending** — Run `make infra-provision` di laptop ber-AWS, lalu `make install-cluster`, capture error ke `docs/errors.md`
 
 ---
@@ -88,7 +90,9 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 | Satu module handle semua (VPC, SG, NLB, EC2) | ✅ | 2026-06-22 | `main.tf` — module vpc + sg + module ec2 + aws_lb |
 | Setup script — install prereq tools | ✅ | 2026-06-22 | `scripts/setup.sh` + `make setup` |
 | Install script — RKE2 + Rancher | ✅ | 2026-06-22 | `scripts/install-cluster.sh` + `make install-cluster` |
-| Drop LB EC2, pakai AWS NLB (split worker BE/FE/DB) | ✅ | 2026-06-22 | NLB DNS auto-injected ke config.yml lewat install-cluster |
+| Drop LB EC2, split worker BE/FE/DB | ✅ | 2026-06-22 | Worker split di variables.tf |
+| Split subnet public/private + NAT GW | ✅ | 2026-06-22 | VPC dengan 4 subnet (2 public + 2 private) di 2 AZ |
+| Drop AWS NLB (pakai master public IP sebagai endpoint) | ✅ | 2026-06-23 | install-cluster.sh inject master public IP ke config.yml |
 | Timeline doc | ✅ | 2026-06-22 | `docs/timeline.md` (file ini) |
 | Commit + push ke `andrerexfords/PROJECT` | ✅ | 2026-06-22 | commit terbaru di branch `main` |
 

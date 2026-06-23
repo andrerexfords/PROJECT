@@ -2,10 +2,10 @@
 
 Helper untuk task automation infrastruktur GLChat. Bagian dari workflow 2 layer:
 
-1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 5-6 EC2 + AWS NLB
+1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 5-6 EC2 (tanpa AWS LB)
 2. **`gl-sre-helm-charts/`** (clone sibling) — upstream repo yang install RKE2/Rancher/apps via `make infra-standalone-scripts`
 
-**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). Load balancer pakai **AWS NLB** (bukan EC2). **Network:** bastion + NLB di public subnet, k8s nodes di private subnet (egress via NAT Gateway).
+**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). **Tanpa LB terpisah** — master public IP jadi endpoint. **Network:** bastion + master di public subnet, workers di private subnet (egress via NAT Gateway).
 
 Layout di laptop target:
 ```
@@ -58,8 +58,8 @@ cp terraform.tfvars.example terraform.tfvars
 cd ../..
 
 make infra-plan          # cek dulu
-make infra-provision     # default: VPC + NLB + 5 EC2 (bastion + master + worker-be/fe/db, NO GPU)
-make infra-output        # catat public/private IP + NLB DNS
+make infra-provision     # default: VPC + 5 EC2 (bastion + master + worker-be/fe/db, NO GPU)
+make infra-output        # catat public/private IP
 ```
 
 Kalau perlu GPU node:
@@ -131,8 +131,8 @@ Quick reference:
 | Command                    | Fungsi |
 |----------------------------|--------|
 | `make setup`               | Install prereq tools (terraform/aws/kubectl/jq) di laptop |
-| `make infra-provision`     | Terraform apply (VPC + NLB + 5 EC2, no GPU) |
-| `make infra-provision-gpu` | Terraform apply (VPC + NLB + 6 EC2, + GPU) |
+| `make infra-provision`     | Terraform apply (VPC + 5 EC2, no GPU) |
+| `make infra-provision-gpu` | Terraform apply (VPC + 6 EC2, + GPU) |
 | `make infra-output`        | Print IP/ID semua instance + VPC info |
 | `make install-cluster`     | Auto install RKE2+Rancher via bastion (no GPU) |
 | `make install-cluster-gpu` | Sama, include GPU |
@@ -152,7 +152,7 @@ glchat-infra/
 ├── README.md                      # file ini
 ├── .gitignore                     # ignore tfstate, tfvars, pem, dll
 ├── modules/
-│   └── glchat-aws/                # SATU module: VPC + SG + NLB + 5/6 EC2
+│   └── glchat-aws/                # SATU module: VPC + SG + 5/6 EC2 (tanpa LB)
 │       ├── main.tf
 │       ├── variables.tf
 │       ├── outputs.tf

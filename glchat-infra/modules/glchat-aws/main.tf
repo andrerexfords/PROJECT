@@ -15,12 +15,10 @@ locals {
   instances_to_create = var.include_gpu ? merge(var.instances, { gpu = var.gpu_instance }) : var.instances
 
   # Instance placement:
-  #   - bastion       → public subnet  (SSH dari internet via allowed_ssh_cidr)
-  #   - master, worker-*, gpu → private subnet (no public IP, akses via bastion / NLB)
-  public_instances = ["bastion"]
-
-  master_keys = [for k, v in local.instances_to_create : k if can(regex("master", k))]
-  worker_keys = [for k, v in local.instances_to_create : k if can(regex("worker|gpu", k))]
+  #   - bastion → public subnet (SSH dari internet via allowed_ssh_cidr)
+  #   - master  → public subnet (jadi endpoint k8s API & Rancher karena tidak pakai NLB)
+  #   - workers (be/fe/db/gpu) → private subnet (no public IP, akses via bastion / master)
+  public_instances = ["bastion", "master"]
 }
 
 # ---------- VPC + Subnets + IGW + NAT GW ----------
@@ -53,18 +51,16 @@ resource "aws_security_group" "glchat" {
   description = "Security group cluster GLChat standalone"
   vpc_id      = module.vpc.vpc_id
 
-  # SSH dari allowed_ssh_cidr ke bastion (workers di private subnet, jadi tidak reachable dari internet bahkan dgn rule ini).
   ingress {
-    description = "SSH (effective hanya untuk bastion di public subnet)"
+    description = "SSH (bastion + master di public subnet)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
   }
 
-  # k8s API & HTTP/HTTPS — NLB forward ke target (workers di private subnet pakai source IP client).
   ingress {
-    description = "Kubernetes API (via NLB)"
+    description = "Kubernetes API (langsung ke master public IP)"
     from_port   = 6443
     to_port     = 6443
     protocol    = "tcp"
@@ -72,7 +68,7 @@ resource "aws_security_group" "glchat" {
   }
 
   ingress {
-    description = "HTTPS (via NLB → ingress controller)"
+    description = "HTTPS (Rancher UI + apps via ingress controller di master/worker)"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -80,7 +76,7 @@ resource "aws_security_group" "glchat" {
   }
 
   ingress {
-    description = "HTTP (via NLB → ingress / LetsEncrypt)"
+    description = "HTTP (LetsEncrypt HTTP-01 / ingress)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -120,7 +116,7 @@ module "ec2" {
   instance_type = each.value.instance_type
   key_name      = var.key_name
 
-  # Bastion → public subnet + public IP. Worker/master → private subnet, no public IP.
+  # bastion + master → public subnet + public IP. Worker/gpu → private subnet, no public IP.
   subnet_id                   = contains(local.public_instances, each.key) ? module.vpc.public_subnets[0] : module.vpc.private_subnets[0]
   associate_public_ip_address = contains(local.public_instances, each.key)
 
@@ -130,152 +126,4 @@ module "ec2" {
     Name = "${local.name_prefix}-${each.key}"
     Role = each.value.role
   })
-}
-
-# ---------- AWS NLB (Network Load Balancer) ----------
-# NLB di public subnet (internet-facing), target di private subnet — pola standard.
-#   - Listener 6443 (TCP) → master(s)     k8s API
-#   - Listener 443  (TCP) → workers       ingress HTTPS
-#   - Listener 80   (TCP) → workers       ingress HTTP / LetsEncrypt HTTP-01
-
-resource "aws_lb" "glchat" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  name               = "${local.name_prefix}-nlb"
-  load_balancer_type = "network"
-  subnets            = module.vpc.public_subnets
-  internal           = false
-
-  enable_cross_zone_load_balancing = true
-
-  tags = local.common_tags
-}
-
-# --- API target group (6443 → masters) ---
-
-resource "aws_lb_target_group" "api" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  name        = substr("${local.name_prefix}-api", 0, 32)
-  port        = 6443
-  protocol    = "TCP"
-  vpc_id      = module.vpc.vpc_id
-  target_type = "instance"
-
-  health_check {
-    protocol            = "TCP"
-    port                = "6443"
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 10
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_target_group_attachment" "api" {
-  for_each = var.enable_load_balancer ? toset(local.master_keys) : toset([])
-
-  target_group_arn = aws_lb_target_group.api[0].arn
-  target_id        = module.ec2[each.value].id
-  port             = 6443
-}
-
-resource "aws_lb_listener" "api" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  load_balancer_arn = aws_lb.glchat[0].arn
-  port              = 6443
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.api[0].arn
-  }
-}
-
-# --- HTTPS target group (443 → workers) ---
-
-resource "aws_lb_target_group" "https" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  name        = substr("${local.name_prefix}-https", 0, 32)
-  port        = 443
-  protocol    = "TCP"
-  vpc_id      = module.vpc.vpc_id
-  target_type = "instance"
-
-  health_check {
-    protocol            = "TCP"
-    port                = "443"
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 10
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_target_group_attachment" "https" {
-  for_each = var.enable_load_balancer ? toset(local.worker_keys) : toset([])
-
-  target_group_arn = aws_lb_target_group.https[0].arn
-  target_id        = module.ec2[each.value].id
-  port             = 443
-}
-
-resource "aws_lb_listener" "https" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  load_balancer_arn = aws_lb.glchat[0].arn
-  port              = 443
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.https[0].arn
-  }
-}
-
-# --- HTTP target group (80 → workers) ---
-
-resource "aws_lb_target_group" "http" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  name        = substr("${local.name_prefix}-http", 0, 32)
-  port        = 80
-  protocol    = "TCP"
-  vpc_id      = module.vpc.vpc_id
-  target_type = "instance"
-
-  health_check {
-    protocol            = "TCP"
-    port                = "80"
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 10
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_target_group_attachment" "http" {
-  for_each = var.enable_load_balancer ? toset(local.worker_keys) : toset([])
-
-  target_group_arn = aws_lb_target_group.http[0].arn
-  target_id        = module.ec2[each.value].id
-  port             = 80
-}
-
-resource "aws_lb_listener" "http" {
-  count = var.enable_load_balancer ? 1 : 0
-
-  load_balancer_arn = aws_lb.glchat[0].arn
-  port              = 80
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.http[0].arn
-  }
 }

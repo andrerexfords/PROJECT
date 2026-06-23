@@ -27,3 +27,7 @@ single_nat_gateway = true
 
 # Default: false. Set true kalau client butuh GPU worker.
 include_gpu = false
+
+# Catatan: module ini TIDAK provision AWS NLB. Endpoint k8s API & Rancher
+# pakai public IP master langsung. Kalau perlu LB managed, fork module
+# ini dan tambah resource aws_lb.

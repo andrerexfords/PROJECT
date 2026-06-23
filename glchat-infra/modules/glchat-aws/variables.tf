@@ -117,10 +117,4 @@ variable "gpu_instance" {
   }
 }
 
-# ---------- Load Balancer (AWS NLB) ----------
-
-variable "enable_load_balancer" {
-  description = "Provision AWS NLB di depan worker nodes (untuk ingress) & master (untuk API)"
-  type        = bool
-  default     = true
-}
+# (Tidak pakai AWS NLB — endpoint k8s/Rancher pakai public IP master langsung.)

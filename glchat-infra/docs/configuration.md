@@ -66,10 +66,9 @@ cp terraform.tfvars.example terraform.tfvars
 | `project_name`         | `"glchat"`                   | Kalau ingin nama resource beda |
 | `environment`          | `"standalone"`               | `dev`, `staging`, `prod`, dll |
 | `vpc_cidr`             | `"10.0.0.0/16"`              | Kalau conflict dengan VPC existing |
-| `public_subnet_cidrs`  | `["10.0.1.0/24", "10.0.2.0/24"]`   | NLB + bastion (multi-AZ) |
-| `private_subnet_cidrs` | `["10.0.11.0/24","10.0.12.0/24"]`  | k8s master + workers (multi-AZ) |
+| `public_subnet_cidrs`  | `["10.0.1.0/24", "10.0.2.0/24"]`   | Bastion + master (multi-AZ) |
+| `private_subnet_cidrs` | `["10.0.11.0/24","10.0.12.0/24"]`  | Workers + gpu (multi-AZ) |
 | `single_nat_gateway`   | `true`                       | `true`=1 NAT (~$32/mo), `false`=per-AZ HA (~$64/mo) |
-| `enable_load_balancer` | `true`                       | Set `false` kalau LB di-handle terpisah |
 
 ### AMI ID Ubuntu 22.04 LTS (per region, per Juni 2026)
 

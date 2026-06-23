@@ -8,7 +8,7 @@
 #   4. Run `make infra-standalone-scripts` di bastion (default --exclude gpu-node, sesuai Task 2)
 #
 # Arsitektur: bastion + master + worker-be + worker-fe + worker-db (+ optional GPU).
-# Load balancer pakai AWS NLB (dns_name dari terraform output).
+# Tanpa AWS NLB — endpoint k8s/Rancher pakai public IP master langsung.
 #
 # Usage:
 #   ./scripts/install-cluster.sh                 # default no-GPU
@@ -58,31 +58,31 @@ cd "$TF_DIR"
 TF_OUT=$(terraform output -json 2>/dev/null) || die "Gagal baca terraform output. Pastikan 'make infra-provision' sudah dijalankan."
 
 BASTION_IP=$(echo "$TF_OUT"   | jq -r '.instance_public_ips.value.bastion // empty')
+MASTER_PUB_IP=$(echo "$TF_OUT" | jq -r '.instance_public_ips.value.master // empty')
 MASTER_IP=$(echo "$TF_OUT"    | jq -r '.instance_private_ips.value.master // empty')
 WORKER_BE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-be"] // empty')
 WORKER_FE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-fe"] // empty')
 WORKER_DB_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-db"] // empty')
 GPU_IP=$(echo "$TF_OUT"       | jq -r '.instance_private_ips.value.gpu // empty')
-NLB_DNS=$(echo "$TF_OUT"      | jq -r '.nlb_dns_name.value // empty')
 
-[[ -z "$BASTION_IP"   ]] && die "Bastion IP kosong di terraform output"
-[[ -z "$MASTER_IP"    ]] && die "Master private IP kosong"
-[[ -z "$WORKER_BE_IP" ]] && die "Worker-BE private IP kosong"
-[[ -z "$WORKER_FE_IP" ]] && die "Worker-FE private IP kosong"
-[[ -z "$WORKER_DB_IP" ]] && die "Worker-DB private IP kosong"
-[[ -z "$NLB_DNS"      ]] && die "NLB DNS kosong (enable_load_balancer=false?)"
+[[ -z "$BASTION_IP"    ]] && die "Bastion IP kosong di terraform output"
+[[ -z "$MASTER_PUB_IP" ]] && die "Master public IP kosong (master harus di public subnet)"
+[[ -z "$MASTER_IP"     ]] && die "Master private IP kosong"
+[[ -z "$WORKER_BE_IP"  ]] && die "Worker-BE private IP kosong"
+[[ -z "$WORKER_FE_IP"  ]] && die "Worker-FE private IP kosong"
+[[ -z "$WORKER_DB_IP"  ]] && die "Worker-DB private IP kosong"
 
-# Default LB_DOMAIN ke NLB DNS kalau user tidak set
-[[ -z "$LB_DOMAIN" ]] && LB_DOMAIN="$NLB_DNS"
+# Default LB_DOMAIN ke master public IP kalau user tidak set custom domain
+[[ -z "$LB_DOMAIN" ]] && LB_DOMAIN="$MASTER_PUB_IP"
 
 ok "Bastion (public)     = $BASTION_IP"
+ok "Master  (public)     = $MASTER_PUB_IP"
 ok "Master  (private)    = $MASTER_IP"
 ok "Worker-BE (private)  = $WORKER_BE_IP"
 ok "Worker-FE (private)  = $WORKER_FE_IP"
 ok "Worker-DB (private)  = $WORKER_DB_IP"
 [[ -n "$GPU_IP" ]] && ok "GPU (private)        = $GPU_IP"
-ok "NLB DNS              = $NLB_DNS"
-ok "LB server_name       = $LB_DOMAIN"
+ok "LB endpoint (no NLB) = $LB_DOMAIN"
 
 # ---------- 2. generate config.generated.yml ----------
 
@@ -106,13 +106,13 @@ cat > "$CONFIG_OUT" <<YAML
 # AUTO-GENERATED oleh scripts/install-cluster.sh pada $(date -Iseconds)
 # Edit field bertanda CHANGEME sebelum apply ke bastion.
 #
-# Arsitektur:
-#   bastion     - control center (bukan k8s node)
-#   master      - RKE2 control plane (etcd + controlplane)
-#   worker-be   - backend workloads
-#   worker-fe   - frontend workloads
-#   worker-db   - database workloads (di-taint)
-# Load balancer: AWS NLB ($NLB_DNS)
+# Arsitektur (tanpa AWS NLB):
+#   bastion     - control center (bukan k8s node, public)
+#   master      - RKE2 control plane + endpoint k8s API & Rancher (public)
+#   worker-be   - backend workloads (private)
+#   worker-fe   - frontend workloads (private)
+#   worker-db   - database workloads (private, di-taint)
+# Endpoint: master public IP = $MASTER_PUB_IP
 
 infra:
   bastion:
@@ -157,10 +157,10 @@ $GPU_NODE_BLOCK
 
   load_balancer:
     ssl: true
-    server_name: "$LB_DOMAIN"           # CHANGEME (kalau pakai custom domain, point ke NLB DNS)
-    # AWS NLB pakai DNS name, bukan static IP. Field di bawah diisi DNS untuk kompatibilitas.
-    internal_ip: $NLB_DNS
-    external_ip: $NLB_DNS
+    server_name: "$LB_DOMAIN"           # CHANGEME kalau pakai custom domain (point A record ke $MASTER_PUB_IP)
+    # Tanpa NLB — pakai master IP sebagai endpoint langsung.
+    internal_ip: $MASTER_IP
+    external_ip: $MASTER_PUB_IP
 
 # 'apps:' section TIDAK di-generate — copy dari example upstream lalu sesuaikan.
 # Scope task: infrastructure only (kalau perlu app cuma learning app).
