@@ -17,6 +17,18 @@ Sebelum mulai di laptop ber-AWS, siapkan:
 
 ---
 
+## 0️⃣ Terraform state di S3
+
+State Terraform disimpan di `s3://prj-idvend/prj-aws-glchat/standalone/terraform.tfstate` (region `us-east-1`).
+
+**Untuk laptop yang sudah pernah apply** (state masih local): lihat [`docs/migrate-state-to-s3.md`](migrate-state-to-s3.md) untuk cara migrate.
+
+**Untuk laptop baru** (clone fresh): tinggal `terraform init`, state auto-pull dari S3.
+
+**Prerequisite:** bucket `prj-idvend` harus exist + AWS creds punya permission S3 (lihat migration doc).
+
+---
+
 ## 1️⃣ AWS credentials
 
 **Dimana:** environment / `~/.aws/credentials`
