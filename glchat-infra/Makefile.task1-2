@@ -1,0 +1,118 @@
+# Makefile fokus untuk Task 1 (provision + install cluster) & Task 2 (exclude GPU).
+# Task 3 (label/taint nodes) BELUM ada di sini — nanti di-merge.
+#
+# Cara pakai:
+#   make -f Makefile.task1-2 help
+#   make -f Makefile.task1-2 infra-provision
+#   ...
+#
+# Atau bikin alias:
+#   alias mk='make -f Makefile.task1-2'
+#   mk help
+
+.PHONY: help setup setup-dry \
+        infra-init infra-plan infra-provision infra-provision-gpu infra-output infra-destroy \
+        install-cluster install-cluster-gpu install-cluster-dry \
+        handoff clean
+
+TERRAFORM_DIR := modules/glchat-aws
+SCRIPTS_DIR   := scripts
+TF := terraform -chdir=$(TERRAFORM_DIR)
+
+# Task 2: GPU di-exclude by default. Override via INCLUDE_GPU=true atau target -gpu.
+INCLUDE_GPU ?= false
+
+help:
+	@echo "GLChat infra — Task 1 (provision + install) & Task 2 (GPU exclude default)."
+	@echo ""
+	@echo "Bootstrap:"
+	@echo "  setup                - install prereq (terraform/aws/kubectl/jq) di laptop"
+	@echo "  setup-dry            - preview install tanpa apply"
+	@echo ""
+	@echo "Task 1a — Provision AWS infra (Terraform):"
+	@echo "  infra-init           - terraform init"
+	@echo "  infra-plan           - terraform plan (default no-GPU)"
+	@echo "  infra-provision      - apply: VPC + 5 EC2 (bastion + master + worker-be/fe/db)  [Task 2 default]"
+	@echo "  infra-provision-gpu  - apply: VPC + 6 EC2 (+ GPU worker)                          [Task 2 opt-in]"
+	@echo "  infra-output         - tampilkan IP & ID semua instance"
+	@echo "  infra-destroy        - destroy semua resource (HATI-HATI)"
+	@echo ""
+	@echo "Task 1b — Install RKE2 + Rancher (via bastion):"
+	@echo "  install-cluster      - generate config + SSH bastion + run installer (NO GPU)"
+	@echo "  install-cluster-gpu  - sama, include GPU"
+	@echo "  install-cluster-dry  - dry-run: generate config saja, tidak SSH"
+	@echo "  handoff              - print instruksi manual (alternatif install-cluster)"
+	@echo ""
+	@echo "Util:"
+	@echo "  clean                - hapus .terraform & tfplan lokal"
+	@echo ""
+	@echo "Task 1c-d (dokumentasi error):"
+	@echo "  Setiap error yg muncul saat install-cluster → tulis ke docs/errors.md"
+
+# ---------- Bootstrap ----------
+
+setup:
+	$(SCRIPTS_DIR)/setup.sh
+
+setup-dry:
+	DRY_RUN=1 $(SCRIPTS_DIR)/setup.sh
+
+# ---------- Task 1a — Terraform provisioning ----------
+
+infra-init:
+	$(TF) init -upgrade
+
+infra-plan: infra-init
+	$(TF) plan -var="include_gpu=$(INCLUDE_GPU)" -out=tfplan
+
+# Task 2: default INCLUDE_GPU=false — GPU di-exclude kecuali user override
+infra-provision: infra-init
+	$(TF) apply -var="include_gpu=$(INCLUDE_GPU)" -auto-approve
+
+infra-provision-gpu:
+	$(MAKE) -f Makefile.task1-2 infra-provision INCLUDE_GPU=true
+
+infra-output:
+	$(TF) output
+
+infra-destroy:
+	$(TF) destroy -var="include_gpu=$(INCLUDE_GPU)" -auto-approve
+
+# ---------- Task 1b — Install RKE2 + Rancher ----------
+
+install-cluster:
+	$(SCRIPTS_DIR)/install-cluster.sh
+
+install-cluster-gpu:
+	INCLUDE_GPU=1 $(SCRIPTS_DIR)/install-cluster.sh
+
+install-cluster-dry:
+	DRY_RUN=1 $(SCRIPTS_DIR)/install-cluster.sh
+
+handoff:
+	@echo "=== NEXT STEPS (alternatif manual, kalau install-cluster tidak cocok) ==="
+	@echo ""
+	@echo "1) Catat IP semua instance:"
+	@echo "     make -f Makefile.task1-2 infra-output"
+	@echo ""
+	@echo "2) SSH ke bastion (forward agent):"
+	@echo "     ssh -A ubuntu@<bastion-public-ip>"
+	@echo ""
+	@echo "3) Di bastion:"
+	@echo "     git clone https://github.com/GDP-ADMIN/gl-sre-helm-charts"
+	@echo "     cd gl-sre-helm-charts"
+	@echo "     # edit config.yml (isi IP master + worker dari step 1)"
+	@echo "     # letakkan secrets di apps/config/"
+	@echo ""
+	@echo "4) Run installer:"
+	@echo "     # Task 2: tanpa GPU"
+	@echo "     make infra-standalone-scripts ARGS=\"--exclude gpu-node\""
+	@echo "     # ATAU dengan GPU:"
+	@echo "     make infra-standalone-scripts"
+	@echo ""
+	@echo "5) Capture error ke docs/errors.md (Task 1c-d)."
+
+# ---------- Util ----------
+
+clean:
+	rm -rf $(TERRAFORM_DIR)/.terraform $(TERRAFORM_DIR)/tfplan
