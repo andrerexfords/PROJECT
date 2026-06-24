@@ -5,6 +5,7 @@
 #   - Terraform     (HashiCorp APT repo)
 #   - AWS CLI v2    (resmi dari amazon, bukan apt)
 #   - kubectl       (Kubernetes APT repo)
+#   - helm          (untuk install Rancher)
 #   - jq            (helper utk parse output JSON)
 #   - make, curl, unzip, gnupg (pendukung)
 #
@@ -118,16 +119,31 @@ else
   ok "kubectl sudah ada: $(kubectl version --client 2>/dev/null | head -1 || true)"
 fi
 
+# ---------- helm ----------
+
+if need_install helm; then
+  log "Install helm (script resmi)..."
+  TMP=$(mktemp -d)
+  run "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o $TMP/get-helm-3.sh"
+  run "chmod +x $TMP/get-helm-3.sh"
+  run "$SUDO $TMP/get-helm-3.sh"
+  run "rm -rf $TMP"
+  ok "helm installed: $(command -v helm 2>/dev/null || echo '(dry-run)')"
+else
+  ok "helm sudah ada: $(helm version --short 2>&1)"
+fi
+
 # ---------- summary ----------
 
 echo
 log "Versi terinstall:"
-for tool in terraform aws kubectl jq make git; do
+for tool in terraform aws kubectl helm jq make git; do
   if command -v "$tool" >/dev/null 2>&1; then
     case "$tool" in
       terraform) v=$(terraform version | head -1) ;;
       aws)       v=$(aws --version 2>&1) ;;
       kubectl)   v=$(kubectl version --client 2>/dev/null | grep -i "client version" | head -1) ;;
+      helm)      v=$(helm version --short 2>&1) ;;
       *)         v=$($tool --version 2>&1 | head -1) ;;
     esac
     printf "  %-10s %s\n" "$tool" "$v"

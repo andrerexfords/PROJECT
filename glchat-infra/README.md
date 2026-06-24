@@ -1,11 +1,13 @@
 # GLChat Infra — Quickstart
 
-Helper untuk task automation infrastruktur GLChat. Bagian dari workflow 2 layer:
+Helper end-to-end untuk automation infra GLChat (Task 1 + 2 + 3):
 
-1. **`glchat-infra/`** (folder ini) — Terraform untuk provision 5-6 EC2 (tanpa AWS LB)
-2. **`gl-sre-helm-charts/`** (clone sibling) — upstream repo yang install RKE2/Rancher/apps via `make infra-standalone-scripts`
+1. **Provision AWS** — VPC + EC2 via Terraform (`modules/glchat-aws/`)
+2. **Install cluster** — RKE2 server + agent via SSH dari scratch (`scripts/install-cluster.sh`)
+3. **Install Rancher** — UI management via Helm (`scripts/install-rancher.sh`, optional)
+4. **Label/taint nodes** — assign workload per role (`scripts/label-taint-nodes.sh`)
 
-**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). **Tanpa LB terpisah** — master public IP jadi endpoint. **Network:** bastion + master di public subnet, workers di private subnet (egress via NAT Gateway).
+**Arsitektur cluster:** bastion + master + worker-be + worker-fe + worker-db (+ optional GPU). **Tanpa LB terpisah** — master public IP jadi endpoint k8s API & Rancher. **Network:** bastion + master di public subnet, workers di private subnet (egress via NAT Gateway).
 
 Layout di laptop target:
 ```
@@ -67,52 +69,51 @@ Kalau perlu GPU node:
 make infra-provision-gpu
 ```
 
-### Step 2 — Install RKE2 + Rancher (otomatis via `install-cluster`)
+### Step 2 — Install RKE2 cluster (otomatis via `install-cluster`)
 
-Script `install-cluster.sh` baca terraform output, generate `config.yml` (IPs auto-filled), copy ke bastion, lalu run installer upstream.
+Script `install-cluster.sh` baca terraform output, SSH ke master & workers via bastion, install RKE2 (server di master, agent di workers), download kubeconfig ke laptop.
 
 ```bash
-# Dry-run dulu — cuma generate config, tidak SSH
+# Dry-run dulu — cuma cek SSH connectivity + print rencana
 make install-cluster-dry
-# Hasil ada di config.generated.yml — review & edit field CHANGEME
 
 # Jalankan beneran (default NO GPU, sesuai Task 2)
 make install-cluster
 
-# Include GPU node
+# Include GPU worker
 make install-cluster-gpu
 ```
 
-Override opsional via env var (sebelum `make`):
+Override opsional via env var:
 ```bash
-REMOTE_USER=admin RANCHER_PASSWORD='S3cret!' LB_DOMAIN='glchat.client.com' make install-cluster
+REMOTE_USER=admin SSH_KEY=~/.ssh/my-keypair.pem make install-cluster
 ```
 
-Sebelum jalankan, letakkan file rahasia di repo upstream (clone-nya akan di bastion):
-- `apps/config/gcp-service-account.json` (minta ke `infra@gdplabs.id`)
-- `apps/config/kube-config.yaml`
-- `apps/config/tls-secret.yaml`
+Output: `kubeconfig-glchat` di root project. Pakai untuk kubectl:
+```bash
+export KUBECONFIG=$(pwd)/kubeconfig-glchat
+kubectl get nodes
+```
+
+### Step 3 — Install Rancher UI (optional)
+
+Setelah cluster ready, install Rancher untuk management UI:
+```bash
+make install-rancher
+```
+
+Auto-generate password kalau tidak di-set. Pakai `.nip.io` untuk wildcard DNS default. Override:
+```bash
+RANCHER_HOSTNAME=rancher.client.com RANCHER_PASSWORD='S3cret!' make install-rancher
+```
 
 **Setiap error yang muncul → tulis ke `docs/errors.md`** pakai template (Task 1c-d).
 
-#### Alternatif manual (kalau `install-cluster` tidak cocok)
+### Step 4 — Label & taint nodes (Task 3)
 
-`make handoff` print instruksi step-by-step untuk:
-1. Clone `gl-sre-helm-charts` sebagai sibling folder
-2. Isi `config.yml` manual
-3. SSH bastion + run installer
-
-### Step 5 — Label & taint nodes
-
-**Cara native (recommended):** isi `labels`/`taints` di `config.yml`, lalu re-apply via repo upstream:
+Setelah cluster ready, apply label/taint per workload (BE/FE/DB):
 ```bash
-make infra-standalone-scripts ARGS="--include label-taints"
-```
-
-**Cara standalone (alternatif):** pakai script di folder ini, butuh `KUBECONFIG`:
-```bash
-cd ../glchat-infra
-export KUBECONFIG=/path/to/kubeconfig
+export KUBECONFIG=$(pwd)/kubeconfig-glchat
 make k8s-label-nodes-dry    # preview perintah
 make k8s-label-nodes        # apply
 ```
@@ -130,16 +131,16 @@ make help
 Quick reference:
 | Command                    | Fungsi |
 |----------------------------|--------|
-| `make setup`               | Install prereq tools (terraform/aws/kubectl/jq) di laptop |
+| `make setup`               | Install prereq tools (terraform/aws/kubectl/helm/jq) |
 | `make infra-provision`     | Terraform apply (VPC + 5 EC2, no GPU) |
 | `make infra-provision-gpu` | Terraform apply (VPC + 6 EC2, + GPU) |
-| `make infra-output`        | Print IP/ID semua instance + VPC info |
-| `make install-cluster`     | Auto install RKE2+Rancher via bastion (no GPU) |
-| `make install-cluster-gpu` | Sama, include GPU |
-| `make install-cluster-dry` | Generate config.generated.yml saja |
-| `make infra-destroy`       | Destroy SEMUA resource (VPC + EC2, HATI-HATI) |
-| `make handoff`             | Print instruksi manual (alternatif install-cluster) |
-| `make k8s-label-nodes`     | Apply label/taint nodes (standalone) |
+| `make infra-output`        | Print IP semua instance |
+| `make install-cluster`     | SSH ke nodes, install RKE2 server+agents |
+| `make install-cluster-gpu` | Sama, include GPU worker |
+| `make install-cluster-dry` | Cek SSH connectivity + print rencana |
+| `make install-rancher`     | Install Rancher UI via Helm (optional) |
+| `make infra-destroy`       | Destroy SEMUA resource (HATI-HATI) |
+| `make k8s-label-nodes`     | Apply label/taint nodes (Task 3) |
 | `make k8s-label-nodes-dry` | Preview perintah label/taint |
 
 ---
@@ -160,9 +161,10 @@ glchat-infra/
 │       ├── terraform.tfvars.example
 │       └── README.md
 ├── scripts/
-│   ├── setup.sh                   # bootstrap prereq (terraform, aws cli, kubectl, jq)
-│   ├── install-cluster.sh         # orchestrate install RKE2+Rancher via bastion
-│   └── label-taint-nodes.sh       # standalone: connect cluster + label/taint
+│   ├── setup.sh                   # bootstrap prereq (terraform/aws/kubectl/helm/jq)
+│   ├── install-cluster.sh         # install RKE2 server di master + agents di workers
+│   ├── install-rancher.sh         # install Rancher UI via Helm (optional)
+│   └── label-taint-nodes.sh       # label/taint k8s nodes per workload
 └── docs/
     ├── configuration.md           # ⭐ checklist SEMUA value yang perlu diisi (baca dulu!)
     ├── errors.md                  # log error `make infra-standalone-scripts` (Task 1c-d)

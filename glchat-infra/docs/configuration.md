@@ -13,8 +13,7 @@ Sebelum mulai di laptop ber-AWS, siapkan:
 - [ ] AMI ID — Ubuntu 22.04 LTS atau Debian 12 di region target
 - [ ] IP publik laptop kamu (untuk SSH whitelist) — cek di https://ifconfig.me
 - [ ] Domain name (opsional, kalau pakai custom domain)
-- [ ] Secret files untuk apps (GCP service account, kubeconfig, TLS cert) — minta ke `infra@gdplabs.id`
-- [ ] Password rancher (random string aman)
+- [ ] (Optional) Password Rancher custom — kalau tidak set, auto-generated
 
 ---
 
@@ -108,96 +107,61 @@ enable_load_balancer = true
 
 ---
 
-## 3️⃣ Install-cluster orchestrator (env vars saat `make install-cluster`)
+## 3️⃣ Install-cluster (env vars saat `make install-cluster`)
 
-Script `scripts/install-cluster.sh` ambil sebagian besar value dari Terraform output (IP & NLB DNS auto-filled), tapi ada beberapa yang perlu di-override via env var.
+Script `scripts/install-cluster.sh` install RKE2 from scratch via SSH. Tidak butuh repo upstream.
 
 ### Field RECOMMENDED override
 
-| Env var                | Default                          | Kapan diisi |
-|------------------------|----------------------------------|-------------|
-| `REMOTE_USER`          | `ubuntu`                         | Ganti ke `admin` kalau pakai Debian, atau `ec2-user` kalau Amazon Linux |
-| `SSH_KEY`              | (auto-detect dari ssh-agent)     | Path ke file `.pem` kalau key tidak di agent: `~/.ssh/my-keypair.pem` |
-| `RANCHER_PASSWORD`     | `CHANGEME-please-edit-config-yml`| **WAJIB ganti** sebelum production. Pakai random string 16+ char |
-| `RANCHER_USERNAME`     | `admin`                          | Biasanya `admin` |
-| `RANCHER_CLUSTER_NAME` | `glchat-standalone`              | Nama cluster di Rancher UI |
-| `LB_DOMAIN`            | (auto = NLB DNS)                 | Kalau pakai custom domain: `"glchat.client.com"` (perlu Route53 record ke NLB DNS) |
-| `K8S_VERSION`          | `v1.32.5+rke2r1`                 | Versi RKE2 |
-| `UPSTREAM_REPO`        | `https://github.com/GDP-ADMIN/gl-sre-helm-charts` | Ganti kalau pakai fork |
+| Env var          | Default                       | Kapan diisi |
+|------------------|-------------------------------|-------------|
+| `REMOTE_USER`    | `ubuntu`                      | `admin` (Debian), `ec2-user` (Amazon Linux) |
+| `SSH_KEY`        | (auto-detect dari ssh-agent)  | Path `.pem` kalau key tidak di agent: `~/.ssh/my-keypair.pem` |
+| `RKE2_VERSION`   | `v1.32.5+rke2r1`              | Versi RKE2 |
+| `INCLUDE_GPU`    | `0`                           | Set `1` untuk include GPU worker (atau pakai `make install-cluster-gpu`) |
+| `AUTO`           | `0`                           | Set `1` untuk skip konfirmasi interaktif |
 
-### Cara pakai
-
-**Sekali jalan (interactive prompt):**
+**Sekali jalan:**
 ```bash
-RANCHER_PASSWORD='S3cretP@ssw0rd123!' make install-cluster
+make install-cluster
 ```
 
 **Banyak override:**
 ```bash
-REMOTE_USER=admin \
-RANCHER_PASSWORD='S3cretP@ssw0rd123!' \
-LB_DOMAIN='glchat.client.com' \
-RANCHER_CLUSTER_NAME='glchat-prod' \
-SSH_KEY=~/.ssh/my-keypair.pem \
-make install-cluster
+REMOTE_USER=admin SSH_KEY=~/.ssh/my-keypair.pem AUTO=1 make install-cluster
 ```
 
-**Auto mode (skip konfirmasi):**
+Output: `kubeconfig-glchat` di root project. Pakai:
 ```bash
-AUTO=1 RANCHER_PASSWORD='...' make install-cluster
+export KUBECONFIG=$(pwd)/kubeconfig-glchat
+kubectl get nodes
 ```
 
 ---
 
-## 4️⃣ `config.generated.yml` (review setelah `install-cluster-dry`)
+## 4️⃣ Install-rancher (optional, env vars)
 
-Setelah `make install-cluster-dry`, cek `config.generated.yml` di root project. Field bertanda **`CHANGEME`** harus diisi sebelum apply beneran:
+Script `scripts/install-rancher.sh` install Rancher UI di cluster.
 
-| Field                                  | Contoh value                  | Catatan |
-|----------------------------------------|-------------------------------|---------|
-| `infra.rancher.password`               | `"S3cretP@ssw0rd123!"`        | Auto-filled dari `RANCHER_PASSWORD` env. Wajib ganti. |
-| `infra.load_balancer.server_name`      | `"glchat.client.com"` atau NLB DNS | Kalau pakai custom domain, point ke NLB DNS via Route53 |
+| Env var               | Default                              | Catatan |
+|-----------------------|--------------------------------------|---------|
+| `KUBECONFIG`          | `./kubeconfig-glchat`                | Path kubeconfig dari install-cluster |
+| `RANCHER_HOSTNAME`    | `rancher.<master_pub_ip>.nip.io`     | Auto-detect dari master IP. Override ke custom domain kalau ada Route53 record |
+| `RANCHER_PASSWORD`    | (auto-generate random 20 chars)      | Override pakai value sendiri |
+| `RANCHER_VERSION`     | (latest stable)                      | Pin ke versi tertentu kalau perlu |
+| `CERT_MANAGER_VERSION`| `v1.15.3`                            | Dependency Rancher |
 
-Field lain biasanya **tidak perlu diubah** karena sudah auto-filled dari Terraform output:
-- `infra.bastion.ip` ← `instance_public_ips.bastion`
-- `infra.rancher.ip` ← `instance_private_ips.master`
-- `infra.rke2.nodes[].ip` ← `instance_private_ips.{master,worker-be,worker-fe,worker-db}`
-- `infra.load_balancer.internal_ip` / `external_ip` ← `nlb_dns_name`
+**Sekali jalan:**
+```bash
+make install-rancher
+```
 
----
+**Custom hostname:**
+```bash
+RANCHER_HOSTNAME=rancher.client.com RANCHER_PASSWORD='S3cret!' make install-rancher
+```
 
-## 5️⃣ Secret files untuk apps (di `apps/config/` repo upstream)
-
-Setelah clone `gl-sre-helm-charts` di bastion (otomatis oleh `install-cluster`), letakkan 3 file ini di `apps/config/`:
-
-| File                          | Sumber                                | Wajib? |
-|-------------------------------|---------------------------------------|--------|
-| `gcp-service-account.json`    | Minta ke `infra@gdplabs.id`           | ✅ (untuk Docker registry GCP) |
-| `kube-config.yaml`            | Di-generate setelah RKE2 install, atau download dari Rancher UI | ✅ (untuk Helm deploy) |
-| `tls-secret.yaml`             | Cert SSL untuk domain kamu — bisa Let's Encrypt atau custom | ✅ kalau `ssl: true` |
-
-**Untuk scope task sekarang (infrastructure only),** kalau install app gagal karena 3 file ini belum ada, **TIDAK MASALAH** — yang penting tahap infra (RKE2 + Rancher) sudah jadi. Catat error-nya di `docs/errors.md` aja.
-
----
-
-## 6️⃣ Domain & DNS (opsional, untuk production)
-
-Kalau pakai custom domain (bukan NLB DNS langsung):
-
-1. **Buat A/CNAME record** di Route53 atau DNS provider:
-   ```
-   glchat.client.com   CNAME   glchat-standalone-nlb-1234abcd.elb.ap-southeast-1.amazonaws.com
-   ```
-   (NLB DNS dapat dari `make infra-output` setelah provision)
-
-2. **Generate TLS cert** untuk domain:
-   - Let's Encrypt via cert-manager
-   - Atau upload manual ke `apps/config/tls-secret.yaml`
-
-3. **Set `LB_DOMAIN`** env saat `make install-cluster`:
-   ```bash
-   LB_DOMAIN='glchat.client.com' make install-cluster
-   ```
+URL + password akan di-print di akhir. Self-signed cert (browser warning OK).
 
 ---
 

@@ -36,7 +36,10 @@ Legend: ✅ Done · ⚠️ Scaffold ready (perlu run di env beneran) · 📋 Pla
 - **2026-06-22 02:15** — Refactor arsitektur: drop LB EC2, split worker jadi BE/FE/DB, add **AWS NLB** (3 listener: 6443/443/80, target masters & workers)
 - **2026-06-22 ~02:45** — Split subnet jadi public (bastion + NLB) + private (k8s nodes) + NAT GW
 - **2026-06-23** — Drop AWS NLB. Master pindah ke public subnet, jadi endpoint k8s API & Rancher langsung. Workers tetap di private.
-- **⏳ Pending** — Run `make infra-provision` di laptop ber-AWS, lalu `make install-cluster`, capture error ke `docs/errors.md`
+- **2026-06-24** — Terraform sudah ter-apply ✅. Sub-module split di-postpone.
+- **2026-06-24** — Repo upstream `gl-sre-helm-charts` ternyata tidak ada (belum dibuat). Rewrite `install-cluster.sh` dari scratch: install RKE2 server di master, agents di workers via SSH. Tambah `install-rancher.sh` untuk Rancher UI via Helm.
+- **2026-06-24** — Buat `Makefile.task1-2` terpisah untuk fokus Task 1 & 2 (Task 3 nanti di-merge).
+- **⏳ Pending** — Jalankan `make -f Makefile.task1-2 install-cluster` di laptop ber-AWS, capture error ke `docs/errors.md`
 
 ---
 

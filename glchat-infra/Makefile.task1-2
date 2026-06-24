@@ -12,8 +12,8 @@
 
 .PHONY: help setup setup-dry \
         infra-init infra-plan infra-provision infra-provision-gpu infra-output infra-destroy \
-        install-cluster install-cluster-gpu install-cluster-dry \
-        handoff clean
+        install-cluster install-cluster-gpu install-cluster-dry install-rancher \
+        clean
 
 TERRAFORM_DIR := modules/glchat-aws
 SCRIPTS_DIR   := scripts
@@ -23,10 +23,10 @@ TF := terraform -chdir=$(TERRAFORM_DIR)
 INCLUDE_GPU ?= false
 
 help:
-	@echo "GLChat infra — Task 1 (provision + install) & Task 2 (GPU exclude default)."
+	@echo "GLChat infra — Task 1 (provision + install RKE2 + Rancher) & Task 2 (GPU exclude default)."
 	@echo ""
 	@echo "Bootstrap:"
-	@echo "  setup                - install prereq (terraform/aws/kubectl/jq) di laptop"
+	@echo "  setup                - install prereq (terraform/aws/kubectl/jq/helm) di laptop"
 	@echo "  setup-dry            - preview install tanpa apply"
 	@echo ""
 	@echo "Task 1a — Provision AWS infra (Terraform):"
@@ -37,17 +37,17 @@ help:
 	@echo "  infra-output         - tampilkan IP & ID semua instance"
 	@echo "  infra-destroy        - destroy semua resource (HATI-HATI)"
 	@echo ""
-	@echo "Task 1b — Install RKE2 + Rancher (via bastion):"
-	@echo "  install-cluster      - generate config + SSH bastion + run installer (NO GPU)"
-	@echo "  install-cluster-gpu  - sama, include GPU"
-	@echo "  install-cluster-dry  - dry-run: generate config saja, tidak SSH"
-	@echo "  handoff              - print instruksi manual (alternatif install-cluster)"
+	@echo "Task 1b — Install cluster (RKE2 di EC2, Rancher via Helm):"
+	@echo "  install-cluster      - SSH ke nodes, install RKE2 server+agents, download kubeconfig"
+	@echo "  install-cluster-gpu  - sama, include GPU worker"
+	@echo "  install-cluster-dry  - dry-run: print rencana, tidak SSH"
+	@echo "  install-rancher      - install Rancher UI di cluster (optional, perlu install-cluster dulu)"
 	@echo ""
 	@echo "Util:"
 	@echo "  clean                - hapus .terraform & tfplan lokal"
 	@echo ""
 	@echo "Task 1c-d (dokumentasi error):"
-	@echo "  Setiap error yg muncul saat install-cluster → tulis ke docs/errors.md"
+	@echo "  Setiap error yg muncul saat install → tulis ke docs/errors.md"
 
 # ---------- Bootstrap ----------
 
@@ -78,7 +78,7 @@ infra-output:
 infra-destroy:
 	$(TF) destroy -var="include_gpu=$(INCLUDE_GPU)" -auto-approve
 
-# ---------- Task 1b — Install RKE2 + Rancher ----------
+# ---------- Task 1b — Install cluster (from scratch) ----------
 
 install-cluster:
 	$(SCRIPTS_DIR)/install-cluster.sh
@@ -89,28 +89,8 @@ install-cluster-gpu:
 install-cluster-dry:
 	DRY_RUN=1 $(SCRIPTS_DIR)/install-cluster.sh
 
-handoff:
-	@echo "=== NEXT STEPS (alternatif manual, kalau install-cluster tidak cocok) ==="
-	@echo ""
-	@echo "1) Catat IP semua instance:"
-	@echo "     make -f Makefile.task1-2 infra-output"
-	@echo ""
-	@echo "2) SSH ke bastion (forward agent):"
-	@echo "     ssh -A ubuntu@<bastion-public-ip>"
-	@echo ""
-	@echo "3) Di bastion:"
-	@echo "     git clone https://github.com/GDP-ADMIN/gl-sre-helm-charts"
-	@echo "     cd gl-sre-helm-charts"
-	@echo "     # edit config.yml (isi IP master + worker dari step 1)"
-	@echo "     # letakkan secrets di apps/config/"
-	@echo ""
-	@echo "4) Run installer:"
-	@echo "     # Task 2: tanpa GPU"
-	@echo "     make infra-standalone-scripts ARGS=\"--exclude gpu-node\""
-	@echo "     # ATAU dengan GPU:"
-	@echo "     make infra-standalone-scripts"
-	@echo ""
-	@echo "5) Capture error ke docs/errors.md (Task 1c-d)."
+install-rancher:
+	$(SCRIPTS_DIR)/install-rancher.sh
 
 # ---------- Util ----------
 

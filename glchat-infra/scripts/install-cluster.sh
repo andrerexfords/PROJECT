@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
-# Orchestrate install RKE2 + Rancher di cluster yang sudah di-provision Terraform.
+# Install RKE2 cluster (server di master + agent di workers).
 #
-# Apa yang dilakukan script ini:
-#   1. Baca output `terraform output -json` (butuh modul glchat-aws sudah ter-apply)
-#   2. Generate `config.generated.yml` — config.yml dengan IP & LB DNS auto-filled
-#   3. SCP config + clone gl-sre-helm-charts di bastion
-#   4. Run `make infra-standalone-scripts` di bastion (default --exclude gpu-node, sesuai Task 2)
+# Dijalankan dari laptop user. SSH ke bastion (public), lalu via -J jumphost
+# ke master/worker (private subnet). Hasil: kubeconfig lokal di
+# ./kubeconfig-glchat untuk dipakai kubectl.
 #
-# Arsitektur: bastion + master + worker-be + worker-fe + worker-db (+ optional GPU).
-# Tanpa AWS NLB — endpoint k8s/Rancher pakai public IP master langsung.
+# Scope:
+#   - Install RKE2 server di master
+#   - Install RKE2 agent di worker-be/fe/db (+ gpu kalau INCLUDE_GPU=1)
+#   - Download kubeconfig + rewrite server URL ke master public IP
+#   - (Tidak install Rancher — pakai scripts/install-rancher.sh terpisah)
 #
 # Usage:
-#   ./scripts/install-cluster.sh                 # default no-GPU
-#   INCLUDE_GPU=1 ./scripts/install-cluster.sh   # include GPU
-#   DRY_RUN=1 ./scripts/install-cluster.sh       # generate config + print perintah, tidak SSH
-#   AUTO=1 ./scripts/install-cluster.sh          # skip konfirmasi interaktif
+#   ./scripts/install-cluster.sh
+#   INCLUDE_GPU=1 ./scripts/install-cluster.sh
+#   DRY_RUN=1 ./scripts/install-cluster.sh           # cuma print rencana
+#   AUTO=1 ./scripts/install-cluster.sh              # skip konfirmasi
+#   SSH_KEY=~/.ssh/my-keypair.pem ./scripts/install-cluster.sh
+#
+# Env vars:
+#   REMOTE_USER     (default: ubuntu)
+#   RKE2_VERSION    (default: v1.32.5+rke2r1)
+#   SSH_KEY         (default: pakai ssh-agent)
+#   INCLUDE_GPU     (default: 0)
+#   DRY_RUN         (default: 0)
+#   AUTO            (default: 0)
 
 set -euo pipefail
 
@@ -26,204 +36,254 @@ INCLUDE_GPU="${INCLUDE_GPU:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 AUTO="${AUTO:-0}"
 
-# Override via env
 REMOTE_USER="${REMOTE_USER:-ubuntu}"
+RKE2_VERSION="${RKE2_VERSION:-v1.32.5+rke2r1}"
 SSH_KEY="${SSH_KEY:-}"
-UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/GDP-ADMIN/gl-sre-helm-charts}"
-RANCHER_USERNAME="${RANCHER_USERNAME:-admin}"
-RANCHER_PASSWORD="${RANCHER_PASSWORD:-CHANGEME-please-edit-config-yml}"
-RANCHER_CLUSTER_NAME="${RANCHER_CLUSTER_NAME:-glchat-standalone}"
-LB_DOMAIN="${LB_DOMAIN:-}"
-K8S_VERSION="${K8S_VERSION:-v1.32.5+rke2r1}"
 
 # ---------- helpers ----------
 
 log()  { echo -e "[\033[36m$(date +%H:%M:%S)\033[0m] $*"; }
 ok()   { echo -e "[\033[32m  OK\033[0m] $*"; }
+warn() { echo -e "[\033[33mWARN\033[0m] $*"; }
 err()  { echo -e "[\033[31m ERR\033[0m] $*" >&2; }
 die()  { err "$1"; exit 1; }
 
 require() { command -v "$1" >/dev/null 2>&1 || die "'$1' tidak ada di PATH. Run: make setup"; }
+require terraform; require jq; require ssh; require scp
 
-require terraform
-require jq
-require ssh
-require scp
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+[[ -n "$SSH_KEY" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
 
-# ---------- 1. read terraform output ----------
+# Helper: SSH ke bastion langsung
+ssh_bastion() { ssh $SSH_OPTS "$REMOTE_USER@$BASTION_IP" "$@"; }
+
+# Helper: SSH ke private node via bastion
+ssh_via_bastion() {
+  local target="$1"; shift
+  ssh $SSH_OPTS -J "$REMOTE_USER@$BASTION_IP" "$REMOTE_USER@$target" "$@"
+}
+
+run_remote() {
+  # Args: target_ip, command
+  local target="$1"; shift
+  local cmd="$*"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "  [DRY-RUN] ssh $REMOTE_USER@$target: $cmd"
+    return 0
+  fi
+  if [[ "$target" == "$BASTION_IP" ]]; then
+    ssh_bastion "$cmd"
+  else
+    ssh_via_bastion "$target" "$cmd"
+  fi
+}
+
+# ---------- 1. Read terraform output ----------
 
 log "Read terraform output dari $TF_DIR..."
 cd "$TF_DIR"
 
 TF_OUT=$(terraform output -json 2>/dev/null) || die "Gagal baca terraform output. Pastikan 'make infra-provision' sudah dijalankan."
 
-BASTION_IP=$(echo "$TF_OUT"   | jq -r '.instance_public_ips.value.bastion // empty')
+BASTION_IP=$(echo "$TF_OUT"    | jq -r '.instance_public_ips.value.bastion // empty')
 MASTER_PUB_IP=$(echo "$TF_OUT" | jq -r '.instance_public_ips.value.master // empty')
-MASTER_IP=$(echo "$TF_OUT"    | jq -r '.instance_private_ips.value.master // empty')
-WORKER_BE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-be"] // empty')
-WORKER_FE_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-fe"] // empty')
-WORKER_DB_IP=$(echo "$TF_OUT" | jq -r '.instance_private_ips.value["worker-db"] // empty')
-GPU_IP=$(echo "$TF_OUT"       | jq -r '.instance_private_ips.value.gpu // empty')
+MASTER_PRIV=$(echo "$TF_OUT"   | jq -r '.instance_private_ips.value.master // empty')
+WORKER_BE=$(echo "$TF_OUT"     | jq -r '.instance_private_ips.value["worker-be"] // empty')
+WORKER_FE=$(echo "$TF_OUT"     | jq -r '.instance_private_ips.value["worker-fe"] // empty')
+WORKER_DB=$(echo "$TF_OUT"     | jq -r '.instance_private_ips.value["worker-db"] // empty')
+GPU_IP=$(echo "$TF_OUT"        | jq -r '.instance_private_ips.value.gpu // empty')
 
 [[ -z "$BASTION_IP"    ]] && die "Bastion IP kosong di terraform output"
-[[ -z "$MASTER_PUB_IP" ]] && die "Master public IP kosong (master harus di public subnet)"
-[[ -z "$MASTER_IP"     ]] && die "Master private IP kosong"
-[[ -z "$WORKER_BE_IP"  ]] && die "Worker-BE private IP kosong"
-[[ -z "$WORKER_FE_IP"  ]] && die "Worker-FE private IP kosong"
-[[ -z "$WORKER_DB_IP"  ]] && die "Worker-DB private IP kosong"
+[[ -z "$MASTER_PUB_IP" ]] && die "Master public IP kosong"
+[[ -z "$MASTER_PRIV"   ]] && die "Master private IP kosong"
+[[ -z "$WORKER_BE"     ]] && die "Worker-BE private IP kosong"
+[[ -z "$WORKER_FE"     ]] && die "Worker-FE private IP kosong"
+[[ -z "$WORKER_DB"     ]] && die "Worker-DB private IP kosong"
 
-# Default LB_DOMAIN ke master public IP kalau user tidak set custom domain
-[[ -z "$LB_DOMAIN" ]] && LB_DOMAIN="$MASTER_PUB_IP"
+WORKERS=("$WORKER_BE" "$WORKER_FE" "$WORKER_DB")
+WORKER_LABELS=("worker-be" "worker-fe" "worker-db")
 
-ok "Bastion (public)     = $BASTION_IP"
-ok "Master  (public)     = $MASTER_PUB_IP"
-ok "Master  (private)    = $MASTER_IP"
-ok "Worker-BE (private)  = $WORKER_BE_IP"
-ok "Worker-FE (private)  = $WORKER_FE_IP"
-ok "Worker-DB (private)  = $WORKER_DB_IP"
-[[ -n "$GPU_IP" ]] && ok "GPU (private)        = $GPU_IP"
-ok "LB endpoint (no NLB) = $LB_DOMAIN"
-
-# ---------- 2. generate config.generated.yml ----------
-
-CONFIG_OUT="$PROJECT_ROOT/config.generated.yml"
-log "Generate $CONFIG_OUT (IP & NLB auto-filled)..."
-
-GPU_NODE_BLOCK=""
-if [[ "$INCLUDE_GPU" == "1" && -n "$GPU_IP" ]]; then
-  GPU_NODE_BLOCK="
-      - name: worker-gpu
-        ip: $GPU_IP
-        role: worker
-        labels:
-          - accelerator=nvidia
-          - workload=gpu
-        taints:
-          - nvidia.com/gpu=true:NoSchedule"
+if [[ "$INCLUDE_GPU" == "1" ]]; then
+  [[ -z "$GPU_IP" ]] && die "INCLUDE_GPU=1 tapi GPU IP kosong. Apply ulang dengan include_gpu=true."
+  WORKERS+=("$GPU_IP")
+  WORKER_LABELS+=("worker-gpu")
 fi
 
-cat > "$CONFIG_OUT" <<YAML
-# AUTO-GENERATED oleh scripts/install-cluster.sh pada $(date -Iseconds)
-# Edit field bertanda CHANGEME sebelum apply ke bastion.
-#
-# Arsitektur (tanpa AWS NLB):
-#   bastion     - control center (bukan k8s node, public)
-#   master      - RKE2 control plane + endpoint k8s API & Rancher (public)
-#   worker-be   - backend workloads (private)
-#   worker-fe   - frontend workloads (private)
-#   worker-db   - database workloads (private, di-taint)
-# Endpoint: master public IP = $MASTER_PUB_IP
+ok "Bastion (public)  = $BASTION_IP"
+ok "Master  (public)  = $MASTER_PUB_IP"
+ok "Master  (private) = $MASTER_PRIV"
+for i in "${!WORKERS[@]}"; do
+  ok "${WORKER_LABELS[$i]} (private) = ${WORKERS[$i]}"
+done
 
-infra:
-  bastion:
-    ip: $BASTION_IP
-    remote_user: "$REMOTE_USER"
+# ---------- 2. Test SSH connectivity ----------
 
-  rancher:
-    ip: $MASTER_IP
-    username: "$RANCHER_USERNAME"
-    password: "$RANCHER_PASSWORD"   # CHANGEME
-    cluster_name: "$RANCHER_CLUSTER_NAME"
-
-  rke2:
-    kubernetes_version: "$K8S_VERSION"
-    nodes:
-      - name: master-1
-        ip: $MASTER_IP
-        role: [etcd, controlplane]
-        labels:
-          - node-role=master
-
-      - name: worker-be
-        ip: $WORKER_BE_IP
-        role: worker
-        labels:
-          - workload=backend
-
-      - name: worker-fe
-        ip: $WORKER_FE_IP
-        role: worker
-        labels:
-          - workload=frontend
-
-      - name: worker-db
-        ip: $WORKER_DB_IP
-        role: worker
-        labels:
-          - workload=database
-        taints:
-          - workload=database:NoSchedule
-$GPU_NODE_BLOCK
-
-  load_balancer:
-    ssl: true
-    server_name: "$LB_DOMAIN"           # CHANGEME kalau pakai custom domain (point A record ke $MASTER_PUB_IP)
-    # Tanpa NLB — pakai master IP sebagai endpoint langsung.
-    internal_ip: $MASTER_IP
-    external_ip: $MASTER_PUB_IP
-
-# 'apps:' section TIDAK di-generate — copy dari example upstream lalu sesuaikan.
-# Scope task: infrastructure only (kalau perlu app cuma learning app).
-YAML
-
-ok "Config generated: $CONFIG_OUT"
-
-# ---------- 3. confirm + show next ----------
-
-ARGS_FLAGS=""
-if [[ "$INCLUDE_GPU" != "1" ]]; then
-  ARGS_FLAGS="--exclude gpu-node"
-  log "Mode: NO GPU (sesuai Task 2 — default exclude)"
-else
-  log "Mode: WITH GPU (INCLUDE_GPU=1)"
+log "Test SSH ke bastion + semua node..."
+if [[ "$DRY_RUN" != "1" ]]; then
+  ssh_bastion 'echo "bastion ok"' >/dev/null || die "SSH ke bastion gagal. Cek SSH_KEY / ssh-agent."
+  ssh_via_bastion "$MASTER_PRIV" 'echo "master ok"' >/dev/null || die "SSH ke master via jumphost gagal."
+  for w in "${WORKERS[@]}"; do
+    ssh_via_bastion "$w" "echo 'worker $w ok'" >/dev/null || die "SSH ke worker $w gagal."
+  done
 fi
+ok "SSH connectivity OK ke semua node"
 
-SSH_OPTS=""
-[[ -n "$SSH_KEY" ]] && SSH_OPTS="-i $SSH_KEY"
-SSH_OPTS="$SSH_OPTS -o StrictHostKeyChecking=accept-new -A"
+# ---------- 3. Konfirmasi ----------
 
 echo
-log "Next steps yang akan dijalankan:"
-echo "  1. scp $CONFIG_OUT  $REMOTE_USER@$BASTION_IP:/tmp/config.yml"
-echo "  2. ssh $REMOTE_USER@$BASTION_IP:"
-echo "     - git clone $UPSTREAM_REPO || (cd gl-sre-helm-charts && git pull)"
-echo "     - cp /tmp/config.yml gl-sre-helm-charts/config.yml"
-echo "     - cd gl-sre-helm-charts && make infra-standalone-scripts ARGS=\"$ARGS_FLAGS\""
+log "Rencana install:"
+echo "  1. RKE2 server (master)  : $MASTER_PRIV   (version $RKE2_VERSION)"
+echo "  2. RKE2 agent (workers)  : ${WORKERS[*]}"
+echo "  3. Download kubeconfig   : $PROJECT_ROOT/kubeconfig-glchat"
+echo "     (server URL di-rewrite ke $MASTER_PUB_IP:6443)"
 echo
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "DRY_RUN=1 → stop di sini. Cek $CONFIG_OUT lalu jalankan tanpa DRY_RUN."
+  log "DRY_RUN=1 → stop di sini."
   exit 0
 fi
 
 if [[ "$AUTO" != "1" ]]; then
-  read -r -p "Lanjut SSH ke bastion & install? [y/N] " yn
-  case "$yn" in
-    y|Y|yes|YES) ;;
-    *) log "Dibatalkan. Config tetap ada di $CONFIG_OUT"; exit 0 ;;
-  esac
+  read -r -p "Lanjut install? [y/N] " yn
+  case "$yn" in y|Y|yes|YES) ;; *) log "Dibatalkan."; exit 0 ;; esac
 fi
 
-# ---------- 4. execute on bastion ----------
+# ---------- 4. Install RKE2 server di master ----------
 
-log "Copy config.yml ke bastion..."
-scp $SSH_OPTS "$CONFIG_OUT" "$REMOTE_USER@$BASTION_IP:/tmp/config.yml"
-
-log "Clone repo + run installer di bastion..."
-ssh $SSH_OPTS "$REMOTE_USER@$BASTION_IP" bash <<REMOTE
+log "Install RKE2 server di master ($MASTER_PRIV)..."
+ssh_via_bastion "$MASTER_PRIV" bash <<REMOTE
 set -euo pipefail
 
-if [[ ! -d gl-sre-helm-charts ]]; then
-  git clone $UPSTREAM_REPO
+if systemctl is-active --quiet rke2-server; then
+  echo "RKE2 server sudah jalan, skip install."
+else
+  # Config: bind ke 0.0.0.0, allow master public IP sebagai tls-san
+  sudo mkdir -p /etc/rancher/rke2
+  sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<EOF
+write-kubeconfig-mode: "0644"
+tls-san:
+  - $MASTER_PRIV
+  - $MASTER_PUB_IP
+node-label:
+  - node-role=master
+EOF
+
+  curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION=$RKE2_VERSION sh -
+  sudo systemctl enable --now rke2-server
 fi
 
-cd gl-sre-helm-charts
-git pull --ff-only || true
-cp /tmp/config.yml ./config.yml
+# Tunggu sampai server ready (cek node-token + kubeconfig terbentuk)
+for i in {1..60}; do
+  if sudo test -s /var/lib/rancher/rke2/server/node-token && sudo test -s /etc/rancher/rke2/rke2.yaml; then
+    echo "RKE2 server ready."
+    break
+  fi
+  echo "Wait RKE2 server... (\$i/60)"
+  sleep 5
+done
 
-echo "==> WARN: kalau apps/config/{gcp-service-account.json,kube-config.yaml,tls-secret.yaml} belum ada, installer kemungkinan gagal di tahap app."
-echo "==> Lanjut tahap infra:"
-make infra-standalone-scripts ARGS="$ARGS_FLAGS"
+# Symlink kubectl + tambah ke PATH (helper)
+sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
 REMOTE
 
-ok "Install selesai. Catat error apapun ke docs/errors.md (Task 1 c-d)."
+ok "RKE2 server installed"
+
+# ---------- 5. Ambil node-token ----------
+
+log "Ambil node-token dari master..."
+NODE_TOKEN=$(ssh_via_bastion "$MASTER_PRIV" 'sudo cat /var/lib/rancher/rke2/server/node-token' | tr -d '\r\n')
+[[ -z "$NODE_TOKEN" ]] && die "node-token kosong"
+ok "Token diperoleh (${#NODE_TOKEN} chars)"
+
+SERVER_URL="https://${MASTER_PRIV}:9345"
+
+# ---------- 6. Install RKE2 agent di workers ----------
+
+log "Install RKE2 agent di ${#WORKERS[@]} worker(s)..."
+
+for i in "${!WORKERS[@]}"; do
+  W_IP="${WORKERS[$i]}"
+  W_LABEL="${WORKER_LABELS[$i]}"
+  log "  → $W_LABEL ($W_IP)..."
+
+  # Label sesuai workload
+  case "$W_LABEL" in
+    worker-be)  K_LABEL="workload=backend" ;;
+    worker-fe)  K_LABEL="workload=frontend" ;;
+    worker-db)  K_LABEL="workload=database" ;;
+    worker-gpu) K_LABEL="workload=gpu" ;;
+    *)          K_LABEL="workload=generic" ;;
+  esac
+
+  ssh_via_bastion "$W_IP" bash <<REMOTE
+set -euo pipefail
+
+if systemctl is-active --quiet rke2-agent; then
+  echo "RKE2 agent sudah jalan di \$(hostname), skip install."
+  exit 0
+fi
+
+sudo mkdir -p /etc/rancher/rke2
+sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<EOF
+server: $SERVER_URL
+token: $NODE_TOKEN
+node-label:
+  - $K_LABEL
+EOF
+
+curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_TYPE=agent INSTALL_RKE2_VERSION=$RKE2_VERSION sh -
+sudo systemctl enable --now rke2-agent
+
+echo "Agent started di \$(hostname)"
+REMOTE
+  ok "  $W_LABEL joined"
+done
+
+# ---------- 7. Download kubeconfig ----------
+
+log "Download kubeconfig ke local..."
+TMP_KCFG=$(mktemp)
+ssh_via_bastion "$MASTER_PRIV" 'sudo cat /etc/rancher/rke2/rke2.yaml' > "$TMP_KCFG"
+
+# Rewrite server URL: 127.0.0.1 → master public IP
+sed -i.bak "s#127.0.0.1#$MASTER_PUB_IP#g" "$TMP_KCFG"
+rm "${TMP_KCFG}.bak"
+
+LOCAL_KCFG="$PROJECT_ROOT/kubeconfig-glchat"
+mv "$TMP_KCFG" "$LOCAL_KCFG"
+chmod 600 "$LOCAL_KCFG"
+
+ok "Kubeconfig saved: $LOCAL_KCFG"
+
+# ---------- 8. Verifikasi cluster ----------
+
+log "Tunggu semua node Ready..."
+export KUBECONFIG="$LOCAL_KCFG"
+
+if command -v kubectl >/dev/null 2>&1; then
+  for i in {1..30}; do
+    READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+    EXPECTED=$((1 + ${#WORKERS[@]}))
+    if [[ "$READY" -ge "$EXPECTED" ]]; then
+      ok "Semua $READY/$EXPECTED node Ready"
+      break
+    fi
+    echo "  Wait... $READY/$EXPECTED Ready ($i/30)"
+    sleep 10
+  done
+
+  echo
+  log "Cluster state:"
+  kubectl get nodes -o wide
+else
+  warn "kubectl tidak ada di laptop ini. Jalankan: export KUBECONFIG=$LOCAL_KCFG"
+fi
+
+echo
+ok "INSTALL CLUSTER SELESAI."
+echo
+echo "Next steps:"
+echo "  1) export KUBECONFIG=$LOCAL_KCFG"
+echo "  2) kubectl get nodes                  # verifikasi"
+echo "  3) make k8s-label-nodes               # apply label/taint (Task 3 — kalau Makefile sudah ada)"
+echo "  4) ./scripts/install-rancher.sh       # install Rancher UI (optional)"
